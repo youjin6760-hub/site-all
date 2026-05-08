@@ -1,0 +1,69 @@
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+.env/
+
+# -------------------------
+# Environment variables
+# -------------------------
+.env
+*.env
+site_ui/.env
+
+# -------------------------
+# Node / React
+# -------------------------
+site_ui/node_modules/
+node_modules/
+site_ui/dist/
+site_ui/build/
+
+# -------------------------
+# Local database
+# -------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# -------------------------
+# Generated / runtime files
+# -------------------------
+debug/
+jobs/
+raw/
+reviewed_json/
+images/
+
+# -------------------------
+# Logs
+# -------------------------
+*.log
+logs/
+
+# -------------------------
+# OS / Editor
+# -------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# -------------------------
+# Docker / temp
+# -------------------------
+*.pid
+*.tmp
+*.temp
