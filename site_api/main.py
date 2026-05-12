@@ -1,11 +1,12 @@
 import os
 import json
+from pathlib import Path
 from io import BytesIO
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
@@ -26,10 +27,30 @@ app.add_middleware(
 # 기본값은 로컬 SQLite입니다. 운영 사이트 DB를 쓰려면 .env에 DATABASE_URL을 넣으세요.
 # 예: sqlite:///./review_app.db
 # 예: mysql+pymysql://user:password@host:3306/dbname?charset=utf8mb4
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./review_app.db")
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_DB_PATH = BASE_DIR / "review_app.db"
+
+raw_database_url = os.getenv("DATABASE_URL", "").strip()
+
+if raw_database_url:
+    DATABASE_URL = raw_database_url
+else:
+    DATABASE_URL = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
+
+if DATABASE_URL.startswith("sqlite:///"):
+    sqlite_path_text = DATABASE_URL.replace("sqlite:///", "", 1)
+
+    if sqlite_path_text and sqlite_path_text != ":memory:":
+        sqlite_path = Path(sqlite_path_text)
+
+        if not sqlite_path.is_absolute():
+            sqlite_path = (BASE_DIR / sqlite_path).resolve()
+
+        sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+        DATABASE_URL = f"sqlite:///{sqlite_path.as_posix()}"
+
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
-
 
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -38,6 +59,7 @@ def now_text() -> str:
 CREATE_QUESTIONS_SQL = """
 CREATE TABLE IF NOT EXISTS questions (
     id INTEGER PRIMARY KEY,
+    course_name TEXT,
     exam_unique_no TEXT,
     cd_value TEXT,
     question_no TEXT,
@@ -80,18 +102,28 @@ CREATE TABLE IF NOT EXISTS review_target_maps (
     subject_start_index INTEGER DEFAULT 1,
     subject_end_index INTEGER DEFAULT 1,
     exam_unique_no TEXT NOT NULL,
-    cd_value TEXT,
-    memo TEXT,
     created_at TEXT,
     updated_at TEXT
 );
 """
 
+def ensure_column(conn, table_name: str, column_name: str, column_sql: str) -> None:
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+
+    rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
+    existing_columns = {row["name"] for row in rows}
+
+    if column_name not in existing_columns:
+        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}"))
+        
 
 def init_db() -> None:
     with engine.begin() as conn:
         conn.execute(text(CREATE_QUESTIONS_SQL))
         conn.execute(text(CREATE_TARGET_MAPS_SQL))
+
+        ensure_column(conn, "questions", "course_name", "course_name TEXT")
 
 
 init_db()
@@ -150,14 +182,13 @@ def is_question_sheet(df: pd.DataFrame) -> bool:
         df, ["문제 번호", "문제번호", "question_no", "no", "번호"]
     )
 
-
-def normalize_question_row(row) -> dict[str, Any]:
+def normalize_question_row(row, default_course_name: str = "") -> dict[str, Any]:
     excel_idx = get_cell(row, ["idx", "IDX", "id", "ID"], "")
     return {
         "id": to_int_or_none(excel_idx),
+        "course_name": get_cell(row, ["강좌명", "course_name", "course"], default_course_name),
         "exam_unique_no": get_cell(row, ["시험 고유 번호", "시험고유번호", "exam_unique_no", "exam_no"], ""),
-        "cd_value": get_cell(row, ["CD값", "cd_value", "cd", "code"], ""),
-        "question_no": get_cell(row, ["문제 번호", "문제번호", "question_no", "번호", "no", "q_no"], ""),
+        "cd_value": get_cell(row, ["CD값", "cd_value", "cd", "code"], ""),        "question_no": get_cell(row, ["문제 번호", "문제번호", "question_no", "번호", "no", "q_no"], ""),
         "question": get_cell(row, ["문제", "question", "question_text", "content", "stem", "title"], ""),
         "view_text": get_cell(row, ["보기_텍스트", "보기텍스트", "보기", "view_text", "view"], ""),
         "image_url": get_cell(row, ["보기_이미지", "보기이미지", "image_url", "img_url", "image"], ""),
@@ -192,12 +223,15 @@ def normalize_target_map_row(row) -> dict[str, Any]:
     subject_name = get_cell(row, ["과목명", "과목", "subject_name", "subject"], "")
     subtype_name = get_cell(row, ["하위유형", "subtype_name", "sub_title", "하위유형명"], "")
     exam_unique_no = get_cell(row, ["시험 고유 번호", "시험고유번호", "exam_unique_no", "exam_no"], "")
-    cd_value = get_cell(row, ["CD값", "cd_value", "cd", "code"], "")
 
     if not display_name:
-        left = set_name or course_name or "검수대상"
-        right = subtype_name or subject_name or exam_unique_no
-        display_name = f"{left} / {right}" if right else left
+        display_parts = [
+            course_name,
+            set_name,
+            subject_name,
+            subtype_name,
+        ]
+        display_name = " / ".join([part for part in display_parts if part]) or exam_unique_no
 
     return {
         "display_name": display_name,
@@ -209,18 +243,93 @@ def normalize_target_map_row(row) -> dict[str, Any]:
         "subject_start_index": to_int_or_none(get_cell(row, ["과목시작index", "subject_start_index", "start_index"], "1")) or 1,
         "subject_end_index": to_int_or_none(get_cell(row, ["과목종료index", "subject_end_index", "end_index"], "1")) or 1,
         "exam_unique_no": exam_unique_no,
-        "cd_value": cd_value,
-        "memo": get_cell(row, ["메모", "memo", "비고"], ""),
         "created_at": now_text(),
         "updated_at": now_text(),
     }
 
+def resolve_target_map_by_names(
+    conn,
+    course_name: str,
+    set_name: str,
+    subject_name: str,
+    sub_title: str = "",
+):
+    params = {
+        "course_name": str(course_name or "").strip(),
+        "set_name": str(set_name or "").strip(),
+        "subject_name": str(subject_name or "").strip(),
+        "subtype_name": str(sub_title or "").strip(),
+    }
+
+    # 1순위: sub_title이 있으면 4개 조건으로 정확히 매칭
+    if params["subtype_name"]:
+        row = conn.execute(
+            text(
+                """
+                SELECT * FROM review_target_maps
+                WHERE TRIM(COALESCE(course_name, '')) = :course_name
+                  AND TRIM(COALESCE(set_name, '')) = :set_name
+                  AND TRIM(COALESCE(subject_name, '')) = :subject_name
+                  AND TRIM(COALESCE(subtype_name, '')) = :subtype_name
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ),
+            params,
+        ).mappings().first()
+
+        if row:
+            return dict(row)
+
+    # 2순위: sub_title이 없거나, 4개 조건 매칭 실패 시 3개 조건으로 매칭
+    row = conn.execute(
+        text(
+            """
+            SELECT * FROM review_target_maps
+            WHERE TRIM(COALESCE(course_name, '')) = :course_name
+              AND TRIM(COALESCE(set_name, '')) = :set_name
+              AND TRIM(COALESCE(subject_name, '')) = :subject_name
+              AND TRIM(COALESCE(subtype_name, '')) = ''
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ),
+        params,
+    ).mappings().first()
+
+    return dict(row) if row else None
 
 def upsert_question(conn, data: dict[str, Any]) -> None:
     columns = [
-        "id", "exam_unique_no", "cd_value", "question_no", "question", "view_text", "image_url", "answer", "score",
-        "choice1", "choice2", "choice3", "choice4", "choice1_image_url", "choice2_image_url", "choice3_image_url", "choice4_image_url",
-        "explanation", "keywords", "review_status", "error_type", "reason", "reviewer", "reviewed_at", "reflect_status", "raw_json", "created_at", "updated_at",
+        "id",
+        "course_name",
+        "exam_unique_no",
+        "cd_value",
+        "question_no",
+        "question",
+        "view_text",
+        "image_url",
+        "answer",
+        "score",
+        "choice1",
+        "choice2",
+        "choice3",
+        "choice4",
+        "choice1_image_url",
+        "choice2_image_url",
+        "choice3_image_url",
+        "choice4_image_url",
+        "explanation",
+        "keywords",
+        "review_status",
+        "error_type",
+        "reason",
+        "reviewer",
+        "reviewed_at",
+        "reflect_status",
+        "raw_json",
+        "created_at",
+        "updated_at",
     ]
     if data.get("id") is not None:
         exists = conn.execute(text("SELECT id FROM questions WHERE id = :id"), {"id": data["id"]}).first()
@@ -244,7 +353,7 @@ def insert_target_map(conn, data: dict[str, Any]) -> None:
 
     columns = [
         "display_name", "course_name", "set_name", "subject_name", "subtype_name", "subject_mode",
-        "subject_start_index", "subject_end_index", "exam_unique_no", "cd_value", "memo", "created_at", "updated_at",
+        "subject_start_index", "subject_end_index", "exam_unique_no", "created_at", "updated_at",
     ]
 
     # 같은 세트/과목/시험번호 조합이 있으면 갱신합니다.
@@ -252,11 +361,12 @@ def insert_target_map(conn, data: dict[str, Any]) -> None:
         text(
             """
             SELECT id FROM review_target_maps
-            WHERE COALESCE(course_name, '') = COALESCE(:course_name, '')
-              AND COALESCE(set_name, '') = COALESCE(:set_name, '')
-              AND COALESCE(subject_name, '') = COALESCE(:subject_name, '')
-              AND COALESCE(subtype_name, '') = COALESCE(:subtype_name, '')
-              AND COALESCE(exam_unique_no, '') = COALESCE(:exam_unique_no, '')
+            WHERE TRIM(COALESCE(course_name, '')) = TRIM(COALESCE(:course_name, ''))
+            AND TRIM(COALESCE(set_name, '')) = TRIM(COALESCE(:set_name, ''))
+            AND TRIM(COALESCE(subject_name, '')) = TRIM(COALESCE(:subject_name, ''))
+            AND TRIM(COALESCE(subtype_name, '')) = TRIM(COALESCE(:subtype_name, ''))
+            ORDER BY id DESC
+            LIMIT 1
             """
         ),
         data,
@@ -282,12 +392,26 @@ def health():
 def get_questions():
     init_db()
     with engine.begin() as conn:
-        rows = conn.execute(text("SELECT * FROM questions ORDER BY CAST(question_no AS INTEGER), id ASC")).mappings().all()
+        rows = conn.execute(
+            text(
+                """
+                SELECT * FROM questions
+                ORDER BY
+                exam_unique_no ASC,
+                CAST(question_no AS INTEGER) ASC,
+                question_no ASC,
+                id ASC
+                """
+            )
+        ).mappings().all()
     return {"items": [dict(row) for row in rows]}
 
 
 @app.post("/api/questions/upload-excel")
-async def upload_excel(file: UploadFile = File(...)):
+async def upload_excel(
+    file: UploadFile = File(...),
+    course_name: str = Form(""),
+):
     init_db()
     filename = file.filename or "uploaded.xlsx"
     contents = await file.read()
@@ -322,7 +446,7 @@ async def upload_excel(file: UploadFile = File(...)):
 
             if is_question_sheet(df):
                 for _, row in df.iterrows():
-                    data = normalize_question_row(row)
+                    data = normalize_question_row(row, default_course_name=course_name.strip())
                     if not data.get("question_no"):
                         continue
                     upsert_question(conn, data)
@@ -334,6 +458,7 @@ async def upload_excel(file: UploadFile = File(...)):
     return {
         "ok": True,
         "filename": filename,
+        "course_name": course_name.strip(),
         "questions_upserted": question_count,
         "target_maps_upserted": map_count,
         "skipped_sheets": skipped_sheets,
@@ -344,9 +469,30 @@ async def upload_excel(file: UploadFile = File(...)):
 def update_question(question_id: int, payload: dict):
     init_db()
     allowed = {
-        "exam_unique_no", "cd_value", "question_no", "question", "view_text", "image_url", "answer", "score",
-        "choice1", "choice2", "choice3", "choice4", "choice1_image_url", "choice2_image_url", "choice3_image_url", "choice4_image_url",
-        "explanation", "keywords", "review_status", "error_type", "reason", "reviewer", "reflect_status",
+        "course_name",
+        "exam_unique_no",
+        "cd_value",
+        "question_no",
+        "question",
+        "view_text",
+        "image_url",
+        "answer",
+        "score",
+        "choice1",
+        "choice2",
+        "choice3",
+        "choice4",
+        "choice1_image_url",
+        "choice2_image_url",
+        "choice3_image_url",
+        "choice4_image_url",
+        "explanation",
+        "keywords",
+        "review_status",
+        "error_type",
+        "reason",
+        "reviewer",
+        "reflect_status",
     }
     update_data = {key: value for key, value in payload.items() if key in allowed}
     update_data["reviewed_at"] = now_text()
@@ -393,8 +539,6 @@ def create_target_map(payload: dict):
         "subject_start_index": int(payload.get("subject_start_index") or payload.get("subjectStartIndex") or 1),
         "subject_end_index": int(payload.get("subject_end_index") or payload.get("subjectEndIndex") or 1),
         "exam_unique_no": str(payload.get("exam_unique_no") or payload.get("examUniqueNo") or "").strip(),
-        "cd_value": payload.get("cd_value") or payload.get("cdValue") or "",
-        "memo": payload.get("memo") or "",
         "created_at": now_text(),
         "updated_at": now_text(),
     }
@@ -424,8 +568,6 @@ def update_target_map(map_id: int, payload: dict):
         "subject_start_index": ["subject_start_index", "subjectStartIndex"],
         "subject_end_index": ["subject_end_index", "subjectEndIndex"],
         "exam_unique_no": ["exam_unique_no", "examUniqueNo"],
-        "cd_value": ["cd_value", "cdValue"],
-        "memo": ["memo"],
     }
 
     update_data = {}
@@ -492,3 +634,39 @@ def reset_database(confirm: str = Query("", description="YES 입력 시 전체 �
         conn.execute(text("DELETE FROM questions"))
         conn.execute(text("DELETE FROM review_target_maps"))
     return {"ok": True}
+
+
+@app.post("/api/target-maps/resolve")
+def resolve_target_map(payload: dict):
+    course_name = payload.get("course_name") or payload.get("courseName") or ""
+    set_name = payload.get("set_name") or payload.get("setName") or ""
+    subject_name = payload.get("subject_name") or payload.get("subjectName") or ""
+    sub_title = (
+        payload.get("sub_title")
+        or payload.get("subTitle")
+        or payload.get("subtype_name")
+        or payload.get("subtypeName")
+        or ""
+    )
+
+    with engine.begin() as conn:
+        matched = resolve_target_map_by_names(
+            conn,
+            course_name=course_name,
+            set_name=set_name,
+            subject_name=subject_name,
+            sub_title=sub_title,
+        )
+
+    if not matched:
+        raise HTTPException(
+            status_code=404,
+            detail="해당 강좌명/세트명/과목명/하위유형에 맞는 시험 고유 번호 매핑을 찾지 못했습니다.",
+        )
+
+    return {
+        "ok": True,
+        "matched": matched,
+        "exam_unique_no": matched.get("exam_unique_no"),
+        "cd_value": matched.get("cd_value"),
+    }

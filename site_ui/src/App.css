@@ -707,6 +707,10 @@
   white-space: pre-wrap;
 }
 
+.readonly-box.has-value {
+  color: #111111;
+}
+
 .readonly-box.muted {
   color: #9ca3af;
 }
@@ -790,7 +794,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 3px;
 }
 
 .error-check-item {
@@ -809,6 +813,9 @@
 
 .error-check-item input {
   margin-top: 2px;
+}
+.error-type-columns + .full-field {
+  margin-top: 18px;
 }
 
 .side-actions {
@@ -858,9 +865,23 @@
 }
 
 .error-type-columns {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+}
+
+.error-check-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 10px 12px;
+}
+
+.error-check-item span {
+  white-space: nowrap;
+  word-break: keep-all;
+  line-height: 1.2;
 }
 
 .error-type-box {
@@ -886,11 +907,7 @@
   font-size: 13px;
 }
 
-@media (max-width: 1400px) {
-  .error-type-columns {
-    grid-template-columns: 1fr;
-  }
-}
+
 .filter-section-title {
   margin: 4px 0 14px;
   font-size: 15px;
@@ -1166,11 +1183,298 @@
 }
 
 .compact-review-grid {
-  grid-template-columns: minmax(260px, 1.1fr) minmax(360px, 1.4fr) minmax(180px, 0.8fr) minmax(220px, 0.9fr);
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
 }
 
 .muted-line {
   background: #f9fafb;
   border-color: #e5e7eb;
   color: #6b7280;
+}
+
+
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 14px 18px;
+  background: #ffffff;
+  border: 1px solid #dfe3ea;
+  border-radius: 12px;
+}
+
+.pagination-info {
+  font-size: 13px;
+  font-weight: 800;
+  color: #374151;
+}
+
+.pagination-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pagination-current {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 82px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid #dfe3ea;
+  border-radius: 5px;
+  background: #f8fafc;
+  font-size: 13px;
+  font-weight: 900;
+  color: #111827;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .pagination-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .pagination-actions {
+    flex-wrap: wrap;
+  }
+}
+
+.target-map-form-grid {
+  grid-template-columns: repeat(5, minmax(160px, 1fr));
+}
+
+.target-map-manager {
+  min-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+}
+
+.target-map-list-wrap {
+  flex: 1;
+  max-height: none;
+}
+
+.target-map-list-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.target-map-list-table th,
+.target-map-list-table td {
+  padding: 10px 12px;
+  border-right: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+  text-align: left;
+  vertical-align: top;
+  font-size: 13px;
+  color: #111827;
+  white-space: nowrap;
+}
+
+.target-map-list-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+  font-weight: 900;
+}
+
+.target-map-row-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-small {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 4px;
+}
+
+@media (max-width: 1500px) {
+  .target-map-form-grid {
+    grid-template-columns: repeat(3, minmax(180px, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .target-map-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.multi-map-select {
+  min-height: 120px !important;
+  height: 120px !important;
+  padding: 8px 12px !important;
+  line-height: 1.5;
+}
+
+.multi-map-select option {
+  padding: 6px 4px;
+}
+
+.target-map-search-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.target-map-search-field {
+  flex: 1;
+  max-width: 620px;
+}
+
+@media (max-width: 900px) {
+  .target-map-search-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .target-map-search-field {
+    max-width: none;
+  }
+}
+
+
+.single-line-input {
+  min-height: 38px;
+  height: 38px;
+  resize: none;
+}
+
+.edit-grid .answer-field {
+  max-width: 120px;
+}
+
+.edit-grid .answer-field input {
+  width: 100%;
+  min-width: 80px;
+  height: 38px;
+}
+
+
+.answer-keyword-grid {
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.answer-keyword-grid .answer-field {
+  width: 90px;
+  max-width: 90px;
+}
+
+.answer-keyword-grid .answer-field input {
+  width: 100%;
+  height: 38px;
+}
+
+.answer-keyword-grid .keyword-field input {
+  width: 100%;
+  height: 38px;
+}
+
+.review-table th.cd-col,
+.review-table td.cd-col {
+  width: 70px;
+  min-width: 70px;
+  max-width: 70px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+
+.review-table th.exam-no-col,
+.review-table td.exam-no-col,
+.review-table th.number-col,
+.review-table td.number-col,
+.review-table th.review-status-col,
+.review-table td.review-status-col,
+.review-table th.reviewer-col,
+.review-table td.reviewer-col {
+  width: 84px;
+  min-width: 84px;
+  max-width: 84px;
+  text-align: center;
+  white-space: normal;
+  word-break: keep-all;
+}
+
+.review-table td.exam-no-col,
+.review-table td.number-col,
+.review-table td.reviewer-col {
+  white-space: nowrap;
+}
+
+.review-table td.review-status-col .status-box {
+  align-items: center;
+}
+
+.review-table td.review-status-col .badge {
+  white-space: nowrap;
+}
+
+.review-table tbody tr {
+  height: 30px;
+}
+
+.review-table th,
+.review-table td {
+  vertical-align: top;
+}
+
+.reason-cell {
+  width: 180px;
+  min-width: 180px;
+  max-width: 180px;
+}
+
+.reason-preview {
+  max-height: 76px;
+  overflow: hidden;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  word-break: keep-all;
+}
+
+.review-table th.manage-col,
+.review-table td.manage-col {
+  width: 94px;
+  min-width: 94px;
+  max-width: 94px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.review-table td.manage-col {
+  vertical-align: middle;
+}
+
+.review-table td.manage-col .btn-row {
+  min-width: 74px;
+  padding: 8px 12px;
+}
+
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 16px;
+  font-size: 18px;
+  font-weight: 900;
+  color: #111827;
 }

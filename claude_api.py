@@ -246,6 +246,8 @@ def has_formula_explanation(data: dict):
 
     return bool(reasons), ", ".join(reasons)
 
+def is_cancel_exception(error: Exception) -> bool:
+    return error.__class__.__name__ == "JobCancelled"
 
 def save_formula_rows_to_xlsx(formula_rows):
     if not formula_rows:
@@ -934,6 +936,7 @@ def review_raw_files(
     issue_xlsx_path: str | Path | None = None,
     formula_xlsx_path: str | Path | None = None,
     write_excel: bool = True,
+    cancel_checker=None,
 ) -> list[dict[str, Any]]:
     """
     전달받은 raw JSON 파일 목록만 Claude로 검수합니다.
@@ -973,19 +976,31 @@ def review_raw_files(
         return []
 
     for raw_file in raw_paths:
+        check_cancel(cancel_checker)
+
         with open(raw_file, "r", encoding="utf-8") as f:
             question_data = json.load(f)
 
         try:
+            check_cancel(cancel_checker)
+
             content_result = review_one(client, prompt_content, question_data, mode="content")
+
+            check_cancel(cancel_checker)
+
             format_result = review_one(client, prompt_format, question_data, mode="format")
 
+            check_cancel(cancel_checker)
+            
             merged = merge_review_results(question_data, content_result, format_result)
             merged = filter_no_issue_entries(merged)
             merged = filter_quote_false_positive_issues(merged)
             merged = add_duplicate_answer_sentence_issue(merged, question_data)
 
         except Exception as e:
+            if is_cancel_exception(e):
+                raise
+
             print(f"[SKIP API 오류] {raw_file.name}: {e}")
             continue
 
@@ -1061,8 +1076,15 @@ def review_raw_files(
 
     return reviewed_results
 
+def check_cancel(cancel_checker=None):
+    if cancel_checker is not None:
+        cancel_checker()
 
-def review_job_dir(job_dir: str | Path, write_excel: bool = True) -> list[dict[str, Any]]:
+def review_job_dir(
+    job_dir: str | Path,
+    write_excel: bool = True,
+    cancel_checker=None,
+) -> list[dict[str, Any]]:
     """job_dir/raw 안의 JSON만 검수하고 job_dir/reviewed_json에 결과를 저장합니다."""
     job_dir = Path(job_dir).resolve()
     raw_dir = job_dir / "raw"
@@ -1082,6 +1104,7 @@ def review_job_dir(job_dir: str | Path, write_excel: bool = True) -> list[dict[s
         issue_xlsx_path=job_dir / "claude.xlsx",
         formula_xlsx_path=job_dir / "exclaude.xlsx",
         write_excel=write_excel,
+        cancel_checker=cancel_checker,
     )
 
 

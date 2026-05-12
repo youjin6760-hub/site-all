@@ -2159,7 +2159,7 @@ def navigate_to_target(page, cfg):
     )
     page.wait_for_timeout(1000)
     save_debug(page, "after_study_click")
-
+    
     if not click_set_card(page, cfg["set_name"]):
         save_debug(page, "set_not_found")
         raise RuntimeError(f"세트 '{cfg['set_name']}'를 찾지 못했습니다.")
@@ -2363,7 +2363,16 @@ def append_manual_review_if_new(q):
                 rf.write(line + "\n")
                 
                 
-def run_collect_configs(configs: list[dict[str, Any]], headless: bool | None = None) -> list[dict[str, Any]]:
+def check_cancel(cancel_checker=None):
+    if cancel_checker is not None:
+        cancel_checker()
+        
+
+def run_collect_configs(
+    configs: list[dict[str, Any]],
+    headless: bool | None = None,
+    cancel_checker=None,
+) -> list[dict[str, Any]]:
     print("[확인] 최신 collect_api.py 실행 중")
     load_dotenv(ROOT / ".env")
 
@@ -2375,6 +2384,7 @@ def run_collect_configs(configs: list[dict[str, Any]], headless: bool | None = N
     if headless is None:
         headless = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() not in ("0", "false", "no")
 
+    collect_errors = []
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
@@ -2389,11 +2399,14 @@ def run_collect_configs(configs: list[dict[str, Any]], headless: bool | None = N
         context.on("page", handle_new_page)
 
         login(page, user_id, password)
+        check_cancel(cancel_checker)
 
         for cfg_idx, cfg in enumerate(configs, start=1):
+            check_cancel(cancel_checker)
+
             try:
                 print(f"\n[설정 시작 {cfg_idx}/{len(configs)}] "
-                      f"{cfg['course_name']} / {cfg['set_name']}")
+                    f"{cfg['course_name']} / {cfg['set_name']}")
 
                 selected_questions, start_no_global, end_no_global = parse_question_selection(cfg)
 
@@ -2431,6 +2444,7 @@ def run_collect_configs(configs: list[dict[str, Any]], headless: bool | None = N
                             print(f"[디버그] 실행 대상 수: {len(targets)}")
 
                             for t_idx, target in enumerate(targets):
+                                check_cancel(cancel_checker)
                                 try:
                                     print(f"[하위 실행 시작] cfg={cfg_idx}, idx={idx}, t_idx={t_idx}, target={target}")
 
@@ -2454,6 +2468,7 @@ def run_collect_configs(configs: list[dict[str, Any]], headless: bool | None = N
                                     save_debug(page, f"after_start_question_{cfg_idx}_{idx}_{t_idx}")
 
                                     while True:
+                                        check_cancel(cancel_checker)
                                         current_question_no = -1
                                         try:
                                             current_question_no = extract_question_number(page)
@@ -2521,6 +2536,7 @@ def run_collect_configs(configs: list[dict[str, Any]], headless: bool | None = N
                             save_debug(page, f"after_start_question_{cfg_idx}_{idx}")
 
                             while True:
+                                check_cancel(cancel_checker)
                                 current_question_no = -1
                                 try:
                                     current_question_no = extract_question_number(page)
@@ -2575,20 +2591,44 @@ def run_collect_configs(configs: list[dict[str, Any]], headless: bool | None = N
                         continue
 
             except Exception as e:
-                print(f"[설정 처리 오류] cfg={cfg_idx} / {e}")
+                message = f"[설정 처리 오류] cfg={cfg_idx} / {e}"
+                print(message)
+                collect_errors.append(message)
                 save_debug(page, f"config_error_{cfg_idx}")
                 continue
 
-        browser.close()
+        try:
+            context.close()
+        except Exception as e:
+            print(f"[경고] context.close 실패 - 무시하고 계속 진행: {e}")
 
-    return load_json_files_from_raw()
+        try:
+            browser.close()
+        except Exception as e:
+            print(f"[경고] browser.close 실패 - 무시하고 계속 진행: {e}")
 
+    collected = load_json_files_from_raw()
+
+    if not collected:
+        if collect_errors:
+            raise RuntimeError(
+                "문제가 하나도 수집되지 않았습니다.\n\n"
+                + "\n".join(collect_errors)
+            )
+
+        raise RuntimeError(
+            "문제가 하나도 수집되지 않았습니다. "
+            "강좌명, 세트명, 과목명, 하위유형, 문제 범위를 확인해 주세요."
+        )
+
+    return collected
 
 def collect_from_target(
     target: dict[str, Any] | list[dict[str, Any]],
     job_id: str | None = None,
     job_dir: str | Path | None = None,
     headless: bool | None = None,
+    cancel_checker=None,
 ) -> list[dict[str, Any]]:
     """
     사이트 API에서 받은 target 값을 한 번만 받아 수집을 실행합니다.
@@ -2599,7 +2639,11 @@ def collect_from_target(
 
     set_runtime_dirs(job_dir)
     configs = normalize_target_configs(target)
-    return run_collect_configs(configs, headless=headless)
+    return run_collect_configs(
+        configs,
+        headless=headless,
+        cancel_checker=cancel_checker,
+    )
 
 
 def main():

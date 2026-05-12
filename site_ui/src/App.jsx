@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
-const API_BASE = import.meta.env.VITE_QUESTION_API_BASE || "http://127.0.0.1:8001";
+const API_BASE = import.meta.env.VITE_QUESTION_API_BASE || "http://192.168.219.167:8000";
 const DEFAULT_REVIEW_API_BASE = import.meta.env.VITE_REVIEW_API_BASE || "http://192.168.219.167:8000";
 
 const CONTENT_ERROR_TYPES = [
+  "문제 매핑 오류",
   "문제 성립 오류",
   "정답 불일치",
   "해설 내용 오류",
@@ -14,6 +15,11 @@ const CONTENT_ERROR_TYPES = [
 ];
 
 const FORMAT_ERROR_TYPES = [
+  "형식 오류",
+  "긴 해설 수동 검토 필요",
+];
+
+const LEGACY_FORMAT_ERROR_TYPES = [
   "해설 시작 형식 오류",
   "선지별 해설 누락",
   "선지 해설 형식 오류",
@@ -21,11 +27,12 @@ const FORMAT_ERROR_TYPES = [
   "결론 누락",
   "최종 문장 형식 오류",
   "기타 형식 오류",
-  "긴 해설 수동 검토 필요",
 ];
 
 const DEFAULT_FILTERS = {
+  courseName: "전체",
   examUniqueNo: "전체",
+  subjectName: "전체",
   cdValue: "전체",
   reviewStatus: "전체",
   errorType: "전체",
@@ -37,6 +44,7 @@ const DEFAULT_FILTERS = {
 const DEFAULT_REVIEW_TARGET = {
   reviewApiBase: DEFAULT_REVIEW_API_BASE,
   targetMapId: "",
+  targetMapIds: [],
   courseName: "",
   setName: "",
   subjectName: "",
@@ -48,8 +56,18 @@ const DEFAULT_REVIEW_TARGET = {
   subjectEndIndex: "1",
   questionRange: "",
   targetScope: "filtered",
-  includeRawData: false,
 };
+
+const DEFAULT_TARGET_MAP_FORM = {
+  id: "",
+  courseName: "",
+  setName: "",
+  subjectName: "",
+  subtypeName: "",
+  examUniqueNo: "",
+};
+
+const TARGET_MAP_PAGE_SIZE = 10;
 
 function getValue(obj, keys, fallback = "") {
   for (const key of keys) {
@@ -118,12 +136,67 @@ function parseReviewRange(rangeText) {
   return { start: Math.min(start, end), end: Math.max(start, end) };
 }
 
-function makeOptions(rows, key) {
+function makeOptions(rows, key, shouldSort = false) {
   const values = rows
     .map((row) => row[key])
     .filter((value) => value !== undefined && value !== null && String(value).trim() !== "" && String(value).trim() !== "-")
     .map(String);
-  return ["전체", ...Array.from(new Set(values))];
+
+  const uniqueValues = Array.from(new Set(values));
+
+  const sortedValues = shouldSort
+    ? [...uniqueValues].sort((a, b) =>
+        a.localeCompare(b, "ko-KR", {
+          numeric: true,
+          sensitivity: "base",
+        })
+      )
+    : uniqueValues;
+
+  return ["전체", ...sortedValues];
+}
+
+function makeSubjectOptions(rows) {
+  const values = rows
+    .map((row) => String(row.subjectName || "").trim() || "미지정")
+    .filter(Boolean);
+
+  const sortedValues = Array.from(new Set(values)).sort((a, b) =>
+    a.localeCompare(b, "ko-KR", {
+      numeric: true,
+      sensitivity: "base",
+    })
+  );
+
+  return ["전체", ...sortedValues];
+}
+
+function makeCourseOptions(rows) {
+  const values = rows
+    .map((row) => String(row.courseName || "").trim() || "미지정")
+    .filter(Boolean);
+
+  const sortedValues = Array.from(new Set(values)).sort((a, b) =>
+    a.localeCompare(b, "ko-KR", {
+      numeric: true,
+      sensitivity: "base",
+    })
+  );
+
+  return ["전체", ...sortedValues];
+}
+
+function makeTargetMapOptions(items, key) {
+  const values = items
+    .map((item) => String(item?.[key] || "").trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(values)).sort((a, b) =>
+    a.localeCompare(b, "ko-KR", {
+      numeric: true,
+      sensitivity: "base",
+    })
+  );
 }
 
 function getStatusClass(status) {
@@ -148,6 +221,52 @@ function splitErrorTypes(value) {
   const text = String(value ?? "").trim();
   if (!text || text === "-" || text === "없음") return [];
   return text.split(/[,/|·\n]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function normalizeErrorTypes(types) {
+  const result = [];
+
+  for (const type of types || []) {
+    if (!type) continue;
+
+    if (type === "긴 해설 수동 검토 필요") {
+      result.push(type);
+      continue;
+    }
+
+    if (type === "형식 오류" || LEGACY_FORMAT_ERROR_TYPES.includes(type)) {
+      result.push("형식 오류");
+      continue;
+    }
+
+    result.push(type);
+  }
+
+  return Array.from(new Set(result));
+}
+
+function toDisplayList(value, fallback = "-") {
+  if (value === undefined || value === null) return fallback;
+
+  if (Array.isArray(value)) {
+    const text = value.map((item) => String(item).trim()).filter(Boolean).join(", ");
+    return text || fallback;
+  }
+
+  const text = String(value).trim();
+  if (!text) return fallback;
+
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      const parsedText = parsed.map((item) => String(item).trim()).filter(Boolean).join(", ");
+      return parsedText || fallback;
+    }
+  } catch {
+    // JSON 문자열이 아니면 그대로 사용합니다.
+  }
+
+  return text;
 }
 
 function mapQuestion(item, index) {
@@ -184,11 +303,35 @@ function mapQuestion(item, index) {
     ],
     ""
   );
+  const subjectName = pick(
+    merged,
+    [
+      "subject_name",
+      "subjectName",
+      "과목명",
+      "과목",
+      "subject",
+    ],
+    ""
+  );
+
+  const courseName = pick(
+    merged,
+    [
+      "course_name",
+      "courseName",
+      "강좌명",
+      "course",
+    ],
+    ""
+  );
 
   return {
     rowKey: `${id}-${index}`,
     id: toText(id),
+    courseName: toText(courseName, ""),
     examUniqueNo: toText(examUniqueNo, ""),
+    subjectName: toText(subjectName, ""),
     cdValue: toText(cdValue, ""),
     number: toText(pick(merged, ["number", "question_no", "q_no", "no", "번호", "문제번호", "문제 번호"]), "-"),
     question: toText(pick(merged, ["question", "question_text", "content", "stem", "title", "문제"]), "-"),
@@ -213,8 +356,14 @@ function App() {
   const [editForm, setEditForm] = useState(null);
   const fileInputRef = useRef(null);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const [currentPage, setCurrentPage] = useState(1);
   const [reviewTarget, setReviewTarget] = useState(DEFAULT_REVIEW_TARGET);
+  const [targetMapForm, setTargetMapForm] = useState(DEFAULT_TARGET_MAP_FORM);
+  const [targetMapSearch, setTargetMapSearch] = useState("");
+  const [targetMapSaving, setTargetMapSaving] = useState(false);
+  const [targetMapPage, setTargetMapPage] = useState(1);
   const [reviewRunning, setReviewRunning] = useState(false);
+  const [cancelingReview, setCancelingReview] = useState(false);
   const [reviewJobInfo, setReviewJobInfo] = useState(null);
   const [selectedRows, setSelectedRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -261,31 +410,149 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    const courseName = window.prompt("이 엑셀 파일의 강좌명을 입력해 주세요.");
+
+    if (!courseName || !courseName.trim()) {
+      alert("강좌명을 입력해야 엑셀을 업로드할 수 있습니다.");
+      event.target.value = "";
+      return;
+    }
+
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("course_name", courseName.trim());
 
     try {
       const res = await fetch(`${API_BASE}/api/questions/upload-excel`, {
         method: "POST",
         body: formData,
       });
-      if (!res.ok) throw new Error("엑셀 업로드 실패");
+
+      const text = await res.text();
+      let result = {};
+
+      try {
+        result = text ? JSON.parse(text) : {};
+      } catch {
+        result = { raw: text };
+      }
+
+      if (!res.ok) {
+        throw new Error(result.detail || result.message || text || "엑셀 업로드 실패");
+      }
+
       await fetchQuestions();
       await fetchTargetMaps();
-      alert("엑셀 데이터를 DB에 업로드했습니다. 검수대상매핑 시트가 있으면 매핑 DB에도 반영됩니다.");
+
+      const questionCount = result.questions_upserted ?? 0;
+      const mapCount = result.target_maps_upserted ?? 0;
+      const skippedSheets = result.skipped_sheets || [];
+
+      if (questionCount === 0 && mapCount === 0) {
+        alert(
+          [
+            "엑셀 파일은 읽었지만 DB에 저장된 데이터가 없습니다.",
+            "",
+            `문제 저장: ${questionCount}건`,
+            `매핑 저장: ${mapCount}건`,
+            `건너뛴 시트: ${skippedSheets.length ? skippedSheets.join(", ") : "없음"}`,
+            "",
+            "엑셀 시트의 컬럼명이 코드에서 인식하는 이름과 맞는지 확인해 주세요.",
+          ].join("\n")
+        );
+        return;
+      }
+
+      alert(
+        [
+          "엑셀 데이터를 DB에 업로드했습니다.",
+          "",
+          `문제 저장/갱신: ${questionCount}건`,
+          `검수대상매핑 저장/갱신: ${mapCount}건`,
+          skippedSheets.length ? `건너뛴 시트: ${skippedSheets.join(", ")}` : "",
+        ].filter(Boolean).join("\n")
+      );
     } catch (error) {
       console.error(error);
-      alert("엑셀 업로드 중 오류가 발생했습니다.");
+      alert(`엑셀 업로드 중 오류가 발생했습니다.\n${error.message}`);
     } finally {
       event.target.value = "";
     }
   };
 
-  const rows = useMemo(() => questions.map((item, index) => mapQuestion(item, index)), [questions]);
+  const rows = useMemo(() => {
+    const subjectByExamUniqueNo = new Map();
+    const courseByExamUniqueNo = new Map();
+
+    targetMaps.forEach((item) => {
+      const examUniqueNo = String(item.exam_unique_no || "").trim();
+      const subjectName = String(item.subject_name || "").trim();
+      const courseName = String(item.course_name || "").trim();
+
+      if (examUniqueNo && subjectName && !subjectByExamUniqueNo.has(examUniqueNo)) {
+        subjectByExamUniqueNo.set(examUniqueNo, subjectName);
+      }
+
+      if (examUniqueNo && courseName && !courseByExamUniqueNo.has(examUniqueNo)) {
+        courseByExamUniqueNo.set(examUniqueNo, courseName);
+      }
+    });
+
+    return questions
+      .map((item, index) => {
+        const row = mapQuestion(item, index);
+
+        return {
+          ...row,
+          courseName:
+            row.courseName ||
+            courseByExamUniqueNo.get(String(row.examUniqueNo || "").trim()) ||
+            "",
+          subjectName:
+            row.subjectName ||
+            subjectByExamUniqueNo.get(String(row.examUniqueNo || "").trim()) ||
+            "",
+        };
+      })
+      .sort(compareQuestionRows);
+  }, [questions, targetMaps]);
+  
+  function compareNatural(a, b) {
+    return String(a ?? "").localeCompare(String(b ?? ""), "ko-KR", {
+      numeric: true,
+      sensitivity: "base",
+    });
+  }
+
+  function compareQuestionRows(a, b) {
+    const examCompare = compareNatural(a.examUniqueNo, b.examUniqueNo);
+    if (examCompare !== 0) return examCompare;
+
+    const aNo = toNumber(a.number);
+    const bNo = toNumber(b.number);
+
+    if (aNo !== null && bNo !== null && aNo !== bNo) {
+      return aNo - bNo;
+    }
+
+    const numberCompare = compareNatural(a.number, b.number);
+    if (numberCompare !== 0) return numberCompare;
+
+    const aId = toNumber(a.id);
+    const bId = toNumber(b.id);
+
+    if (aId !== null && bId !== null && aId !== bId) {
+      return aId - bId;
+    }
+
+    return compareNatural(a.id, b.id);
+  }
 
   const options = useMemo(() => ({
+    courseName: makeCourseOptions(rows),
     examUniqueNo: makeOptions(rows, "examUniqueNo"),
-    cdValue: makeOptions(rows, "cdValue"),
+    subjectName: makeSubjectOptions(rows),
+    cdValue: makeOptions(rows, "cdValue", true),
     reviewStatus: makeOptions(rows, "reviewStatus"),
     errorType: makeOptions(rows, "errorType"),
     reflectStatus: makeOptions(rows, "reflectStatus"),
@@ -293,10 +560,13 @@ function App() {
 
   const filteredRows = useMemo(() => {
     const keyword = lower(filters.search);
+
     return rows.filter((row) => {
       const targetText = lower([
         row.id,
+        row.courseName,
         row.examUniqueNo,
+        String(row.subjectName || "").trim() || "미지정",
         row.cdValue,
         row.number,
         row.question,
@@ -311,17 +581,37 @@ function App() {
       ].join(" "));
 
       const matchExamUniqueNo = filters.examUniqueNo === "전체" || row.examUniqueNo === filters.examUniqueNo;
+      const rowSubjectName = String(row.subjectName || "").trim() || "미지정";
+      const matchSubjectName = filters.subjectName === "전체" || rowSubjectName === filters.subjectName;
+      const rowCourseName = String(row.courseName || "").trim() || "미지정";
+      const matchCourseName = filters.courseName === "전체" || rowCourseName === filters.courseName;
       const matchCdValue = filters.cdValue === "전체" || row.cdValue === filters.cdValue;
       const matchReviewStatus = filters.reviewStatus === "전체" || row.reviewStatus === filters.reviewStatus;
       const matchErrorType = filters.errorType === "전체" || row.errorType === filters.errorType;
       const matchReflectStatus = filters.reflectStatus === "전체" || row.reflectStatus === filters.reflectStatus;
       const matchKeyword = !keyword || targetText.includes(keyword);
 
-      return matchExamUniqueNo && matchCdValue && matchReviewStatus && matchErrorType && matchReflectStatus && matchKeyword;
+      return matchCourseName && matchExamUniqueNo && matchSubjectName && matchCdValue && matchReviewStatus && matchErrorType && matchReflectStatus && matchKeyword;  
     });
   }, [rows, filters]);
 
-  const pageRows = useMemo(() => filteredRows.slice(0, Number(filters.pageSize)), [filteredRows, filters.pageSize]);
+  const pageSizeNumber = Number(filters.pageSize) || 20;
+
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filteredRows.length / pageSizeNumber));
+  }, [filteredRows.length, pageSizeNumber]);
+
+  const pageRows = useMemo(() => {
+    const startIndex = (currentPage - 1) * pageSizeNumber;
+    const endIndex = startIndex + pageSizeNumber;
+    return filteredRows.slice(startIndex, endIndex);
+  }, [filteredRows, currentPage, pageSizeNumber]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   const stats = useMemo(() => ({
     total: rows.length,
@@ -337,11 +627,13 @@ function App() {
   const handleFilterChange = (event) => {
     const { name, value } = event.target;
     setFilters((prev) => ({ ...prev, [name]: value }));
+    setCurrentPage(1);
   };
 
   const resetFilters = () => {
     setFilters(DEFAULT_FILTERS);
     setSelectedRows([]);
+    setCurrentPage(1);
   };
 
   const toggleAll = (checked, visibleRows) => {
@@ -367,105 +659,417 @@ function App() {
   const handleReviewTargetChange = (event) => {
     const { name, value, type, checked } = event.target;
 
-    if (name === "targetMapId") {
-      const selected = targetMaps.find((item) => String(item.id) === String(value));
-
-      if (!selected) {
-        setReviewTarget((prev) => ({
-          ...prev,
-          targetMapId: "",
-          courseName: "",
-          setName: "",
-          subjectName: "",
-          subtypeName: "",
-          subjectMode: "specific",
-          subjectStartIndex: "1",
-          subjectEndIndex: "1",
-          examUniqueNo: "",
-          cdValue: "",
-        }));
-        return;
-      }
-
+    if (name === "courseName") {
       setReviewTarget((prev) => ({
         ...prev,
-        targetMapId: value,
-        courseName: selected.course_name || "",
-        setName: selected.set_name || "",
-        subjectName: selected.subject_name || "",
-        subtypeName: selected.subtype_name || "",
-        subjectMode: selected.subject_mode || "specific",
-        subjectStartIndex: String(selected.subject_start_index || 1),
-        subjectEndIndex: String(selected.subject_end_index || 1),
-        examUniqueNo: selected.exam_unique_no || "",
-        cdValue: selected.cd_value || "",
+        courseName: value,
+        setName: "",
+        subjectName: "",
+        subtypeName: "",
+        targetMapId: "",
+        targetMapIds: [],
+        examUniqueNo: "",
+        cdValue: "",
       }));
       return;
     }
 
-    setReviewTarget((prev) => ({ ...prev, [name]: type === "checkbox" ? checked : value }));
+    if (name === "setName") {
+      setReviewTarget((prev) => ({
+        ...prev,
+        setName: value,
+        subjectName: "",
+        subtypeName: "",
+        targetMapId: "",
+        targetMapIds: [],
+        examUniqueNo: "",
+        cdValue: "",
+      }));
+      return;
+    }
+
+    if (name === "subjectName") {
+      setReviewTarget((prev) => ({
+        ...prev,
+        subjectName: value,
+        subtypeName: "",
+        targetMapId: "",
+        targetMapIds: [],
+        examUniqueNo: "",
+        cdValue: "",
+      }));
+      return;
+    }
+
+    if (name === "subtypeName") {
+      setReviewTarget((prev) => ({
+        ...prev,
+        subtypeName: value,
+        targetMapId: "",
+        targetMapIds: [],
+        examUniqueNo: "",
+        cdValue: "",
+      }));
+      return;
+    }
+
+    setReviewTarget((prev) => ({
+      ...prev,
+      [name]: type === "checkbox" ? checked : value,
+    }));
   };
 
-  const getReviewRows = (mode = reviewTarget.targetScope) => {
-    const range = parseReviewRange(reviewTarget.questionRange);
-    const examUniqueNo = reviewTarget.examUniqueNo.trim();
-    const cdValue = reviewTarget.cdValue.trim();
-    const baseRows = mode === "selected" ? rows.filter((row) => selectedRows.includes(row.rowKey)) : rows;
 
-    if (!reviewTarget.targetMapId || !examUniqueNo) {
+const handleTargetMapFormChange = (event) => {
+  const { name, value } = event.target;
+  setTargetMapForm((prev) => ({ ...prev, [name]: value }));
+};
+
+const resetTargetMapForm = () => {
+  setTargetMapForm(DEFAULT_TARGET_MAP_FORM);
+};
+
+const editTargetMap = (item) => {
+  setTargetMapForm({
+    id: String(item.id || ""),
+    courseName: item.course_name || "",
+    setName: item.set_name || "",
+    subjectName: item.subject_name || "",
+    subtypeName: item.subtype_name || "",
+    examUniqueNo: item.exam_unique_no || "",
+  });
+
+  setPageMode("map");
+};
+
+const saveTargetMap = async () => {
+  const courseName = targetMapForm.courseName.trim();
+  const setName = targetMapForm.setName.trim();
+  const subjectName = targetMapForm.subjectName.trim();
+  const subtypeName = targetMapForm.subtypeName.trim();
+  const examUniqueNo = targetMapForm.examUniqueNo.trim();
+
+  if (!courseName) {
+    alert("강좌명을 입력해 주세요.");
+    return;
+  }
+
+  if (!setName) {
+    alert("세트명을 입력해 주세요.");
+    return;
+  }
+
+  if (!subjectName) {
+    alert("과목명을 입력해 주세요.");
+    return;
+  }
+
+  if (!examUniqueNo) {
+    alert("시험 고유 번호를 입력해 주세요.");
+    return;
+  }
+
+  const payload = {
+    display_name: [courseName, setName, subjectName, subtypeName].filter(Boolean).join(" / "),
+    course_name: courseName,
+    set_name: setName,
+    subject_name: subjectName,
+    subtype_name: subtypeName,
+    exam_unique_no: examUniqueNo,
+
+    subject_mode: "specific",
+    subject_start_index: 1,
+    subject_end_index: 1,
+  };
+
+  const isEdit = Boolean(targetMapForm.id);
+  const url = isEdit
+    ? `${API_BASE}/api/target-maps/${targetMapForm.id}`
+    : `${API_BASE}/api/target-maps`;
+
+  try {
+    setTargetMapSaving(true);
+
+    const res = await fetch(url, {
+      method: isEdit ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await res.text();
+    let result = {};
+
+    try {
+      result = text ? JSON.parse(text) : {};
+    } catch {
+      result = { raw: text };
+    }
+
+    if (!res.ok) {
+      throw new Error(result.detail || result.message || text || "매핑 저장 실패");
+    }
+
+    await fetchTargetMaps();
+
+    if (isEdit && String(reviewTarget.targetMapId) === String(targetMapForm.id)) {
+      setReviewTarget((prev) => ({
+        ...prev,
+        courseName: payload.course_name,
+        setName: payload.set_name,
+        subjectName: payload.subject_name,
+        subtypeName: payload.subtype_name,
+        subjectMode: "specific",
+        subjectStartIndex: "1",
+        subjectEndIndex: "1",
+        examUniqueNo: payload.exam_unique_no,
+        cdValue: "",
+      }));
+    }
+
+    resetTargetMapForm();
+    alert(isEdit ? "검수 대상 매핑을 수정했습니다." : "검수 대상 매핑을 등록했습니다.");
+  } catch (error) {
+    console.error(error);
+    alert(`매핑 저장 중 오류가 발생했습니다.\n${error.message}`);
+  } finally {
+    setTargetMapSaving(false);
+  }
+};
+
+const deleteTargetMap = async (item) => {
+  const ok = window.confirm(`'${item.display_name || item.set_name || item.exam_unique_no}' 매핑을 삭제할까요?`);
+  if (!ok) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/target-maps/${item.id}`, {
+      method: "DELETE",
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || "매핑 삭제 실패");
+    }
+
+    await fetchTargetMaps();
+    resetTargetMapForm();
+    alert("검수 대상 매핑을 삭제했습니다.");
+  } catch (error) {
+    console.error(error);
+    alert(`매핑 삭제 중 오류가 발생했습니다.\n${error.message}`);
+  }
+};
+
+const targetCourseOptions = useMemo(() => {
+  return makeTargetMapOptions(targetMaps, "course_name");
+}, [targetMaps]);
+
+const targetSetOptions = useMemo(() => {
+  return makeTargetMapOptions(
+    targetMaps.filter((item) => {
+      if (!reviewTarget.courseName) return false;
+
+      return String(item.course_name || "").trim() === String(reviewTarget.courseName || "").trim();
+    }),
+    "set_name"
+  );
+}, [targetMaps, reviewTarget.courseName]);
+
+const targetSubjectOptions = useMemo(() => {
+  return makeTargetMapOptions(
+    targetMaps.filter((item) => {
+      if (!reviewTarget.courseName) return false;
+
+      if (String(item.course_name || "").trim() !== String(reviewTarget.courseName || "").trim()) {
+        return false;
+      }
+
+      if (
+        reviewTarget.setName &&
+        String(item.set_name || "").trim() !== String(reviewTarget.setName || "").trim()
+      ) {
+        return false;
+      }
+
+      return true;
+    }),
+    "subject_name"
+  );
+}, [targetMaps, reviewTarget.courseName, reviewTarget.setName]);
+
+const targetSubtypeOptions = useMemo(() => {
+  return makeTargetMapOptions(
+    targetMaps.filter((item) => {
+      if (!reviewTarget.courseName) return false;
+
+      if (String(item.course_name || "").trim() !== String(reviewTarget.courseName || "").trim()) {
+        return false;
+      }
+
+      if (
+        reviewTarget.setName &&
+        String(item.set_name || "").trim() !== String(reviewTarget.setName || "").trim()
+      ) {
+        return false;
+      }
+
+      if (
+        reviewTarget.subjectName &&
+        String(item.subject_name || "").trim() !== String(reviewTarget.subjectName || "").trim()
+      ) {
+        return false;
+      }
+
+      return true;
+    }),
+    "subtype_name"
+  );
+}, [targetMaps, reviewTarget.courseName, reviewTarget.setName, reviewTarget.subjectName]);
+
+  const selectedTargetMaps = useMemo(() => {
+    const courseName = String(reviewTarget.courseName || "").trim();
+    const setName = String(reviewTarget.setName || "").trim();
+    const subjectName = String(reviewTarget.subjectName || "").trim();
+    const subtypeName = String(reviewTarget.subtypeName || "").trim();
+
+    if (!courseName) {
+      return [];
+    }
+
+    return targetMaps.filter((item) => {
+      if (String(item.course_name || "").trim() !== courseName) return false;
+      if (setName && String(item.set_name || "").trim() !== setName) return false;
+      if (subjectName && String(item.subject_name || "").trim() !== subjectName) return false;
+      if (subtypeName && String(item.subtype_name || "").trim() !== subtypeName) return false;
+      return true;
+    });
+  }, [
+    targetMaps,
+    reviewTarget.courseName,
+    reviewTarget.setName,
+    reviewTarget.subjectName,
+    reviewTarget.subtypeName,
+  ]);
+
+  const getBaseReviewRows = (mode = reviewTarget.targetScope) => {
+    return mode === "selected"
+      ? rows.filter((row) => selectedRows.includes(row.rowKey))
+      : rows;
+  };
+
+  const isInReviewQuestionRange = (row) => {
+    const range = parseReviewRange(reviewTarget.questionRange);
+    if (!range) return true;
+
+    const qno = toNumber(row.number);
+    if (qno === null) return false;
+
+    return qno >= range.start && qno <= range.end;
+  };
+
+  const getReviewRowsForMap = (targetMap, mode = reviewTarget.targetScope) => {
+    const baseRows = getBaseReviewRows(mode);
+    const examUniqueNo = String(targetMap?.exam_unique_no || "").trim();
+
+    if (!examUniqueNo) {
       return [];
     }
 
     return baseRows.filter((row) => {
-      const qno = toNumber(row.number);
-      const idx = toNumber(row.id);
-      if (qno === null || idx === null) return false;
-      if (range && (qno < range.start || qno > range.end)) return false;
-      if (String(row.examUniqueNo) !== examUniqueNo) return false;
-      if (cdValue && String(row.cdValue) !== cdValue) return false;
-      return true;
+      if (!isInReviewQuestionRange(row)) return false;
+      return String(row.examUniqueNo || "").trim() === examUniqueNo;
+    });
+  };
+
+  const getReviewRows = (mode = reviewTarget.targetScope) => {
+    const baseRows = getBaseReviewRows(mode);
+
+    // 강좌명을 아직 선택하지 않았으면 초기 화면에서는 전체 문제 표시
+    if (!reviewTarget.courseName) {
+      return baseRows.filter((row) => isInReviewQuestionRange(row));
+    }
+
+    // 강좌명은 선택했는데 매칭 매핑이 없으면 빈 목록
+    if (selectedTargetMaps.length === 0) {
+      return [];
+    }
+
+    const selectedExamNos = new Set(
+      selectedTargetMaps
+        .map((item) => String(item.exam_unique_no || "").trim())
+        .filter(Boolean)
+    );
+
+    return baseRows.filter((row) => {
+      if (!isInReviewQuestionRange(row)) return false;
+      return selectedExamNos.has(String(row.examUniqueNo || "").trim());
     });
   };
 
   const reviewTargetRows = getReviewRows(reviewTarget.targetScope);
 
-  const buildReviewPayload = (targetRows) => {
-    const numbers = targetRows.map((row) => toNumber(row.number)).filter((value) => value !== null).sort((a, b) => a - b);
-    if (numbers.length === 0) throw new Error("검수할 문제 번호가 없습니다.");
+  const buildReviewPayloadForMap = (targetMap, targetRows) => {
+    const numbers = targetRows
+      .map((row) => toNumber(row.number))
+      .filter((value) => value !== null)
+      .sort((a, b) => a - b);
+
+    if (numbers.length === 0) {
+      throw new Error("검수할 문제 번호가 없습니다.");
+    }
 
     const manualQuestionRange = reviewTarget.questionRange.trim();
     const questionRange = manualQuestionRange || "all";
-    const defaultExamUniqueNo = reviewTarget.examUniqueNo.trim();
-    const defaultCdValue = reviewTarget.cdValue.trim();
+    const defaultExamUniqueNo = String(targetMap.exam_unique_no || "").trim();
 
-    if (!reviewTarget.targetMapId || !defaultExamUniqueNo) {
-      throw new Error("검수 대상 매핑을 먼저 선택해 주세요.");
+    if (!defaultExamUniqueNo) {
+      throw new Error("시험 고유 번호가 없는 매핑입니다.");
     }
 
     return {
       job_id: makeJobId(),
-      course_name: reviewTarget.courseName.trim(),
-      set_name: reviewTarget.setName.trim(),
-      subject_name: reviewTarget.subjectName.trim() || undefined,
+      course_name: String(targetMap.course_name || "").trim(),
+      set_name: String(targetMap.set_name || "").trim(),
+      subject_name: String(targetMap.subject_name || "").trim() || undefined,
+      subtype_name: String(targetMap.subtype_name || "").trim() || undefined,
       exam_unique_no: defaultExamUniqueNo,
-      cd_value: defaultCdValue || undefined,
-      subject_mode: reviewTarget.subjectMode,
-      subject_start_index: Number(reviewTarget.subjectStartIndex) || 1,
-      subject_end_index: Number(reviewTarget.subjectEndIndex) || 1,
-      subtype_name: reviewTarget.subtypeName.trim() || undefined,
+      subject_mode: targetMap.subject_mode || "specific",
+      subject_start_index: Number(targetMap.subject_start_index) || 1,
+      subject_end_index: Number(targetMap.subject_end_index) || 1,
       question_range: questionRange,
       questions: targetRows.map((row) => ({
         site_question_id: toNumber(row.id),
         exam_unique_no: defaultExamUniqueNo,
-        cd_value: defaultCdValue || row.cdValue || undefined,
         question_no: toNumber(row.number),
       })),
       options: {
         headless: true,
         write_excel: true,
-        include_raw_data: Boolean(reviewTarget.includeRawData),
+        include_raw_data: true,
       },
     };
+  };
+
+  const filterRowsByReviewStatus = (targetRows, statusFilter) => {
+    if (statusFilter === "uncheckedOrError") {
+      return targetRows.filter((row) =>
+        (row.reviewStatus || "").includes("미검수") ||
+        (row.reviewStatus || "").includes("오류")
+      );
+    }
+
+    if (statusFilter === "errorOnly") {
+      return targetRows.filter((row) => (row.reviewStatus || "").includes("오류"));
+    }
+
+    if (statusFilter === "holdOnly") {
+      return targetRows.filter((row) => (row.reviewStatus || "").includes("보류"));
+    }
+
+    if (statusFilter === "normalOnly") {
+      return targetRows.filter((row) => (row.reviewStatus || "").includes("정상"));
+    }
+
+    return targetRows;
   };
 
   const applyAiReviewResult = async (result) => {
@@ -477,7 +1081,10 @@ function App() {
 
       const issues = item.issues || [];
       const hasIssue = item.review_status === "issue_found" || issues.length > 0;
-      const errorType = hasIssue ? uniqueJoin(issues.map((issue) => issue.issue_type)) : "";
+      const errorType = hasIssue
+        ? normalizeErrorTypes(issues.map((issue) => issue.issue_type)).join(", ")
+        : "";
+
       const reason = hasIssue
         ? issues.map((issue, index) => {
             const title = `[${index + 1}] ${issue.issue_area || ""} / ${issue.issue_type || ""}`.trim();
@@ -513,63 +1120,161 @@ function App() {
         if (!resultRes.ok) throw new Error(`검수 결과 조회 실패: ${resultRes.status}`);
         return await resultRes.json();
       }
+
+      if (statusJson.status === "canceled") {
+        throw new Error("검수 작업이 취소되었습니다.");
+      }
+
       if (statusJson.status === "failed") throw new Error(statusJson.error_message || "검수 작업이 실패했습니다.");
       await new Promise((resolve) => setTimeout(resolve, 5000));
     }
     throw new Error("검수 결과 대기 시간이 초과되었습니다.");
   };
 
+  const cancelCurrentReview = async () => {
+    const jobId = reviewJobInfo?.job_id;
+
+    if (!jobId) {
+      alert("취소할 검수 작업이 없습니다.");
+      return;
+    }
+
+    const ok = window.confirm("현재 진행 중인 검수 작업을 취소할까요?");
+    if (!ok) return;
+
+    const baseUrl = reviewTarget.reviewApiBase.replace(/\/$/, "");
+
+    try {
+      setCancelingReview(true);
+
+      const res = await fetch(`${baseUrl}/review-jobs/${jobId}/cancel`, {
+        method: "POST",
+      });
+
+      const text = await res.text();
+      let result = {};
+
+      try {
+        result = text ? JSON.parse(text) : {};
+      } catch {
+        result = { raw: text };
+      }
+
+      if (!res.ok) {
+        throw new Error(result.detail || result.message || text || "검수 취소 실패");
+      }
+
+      setReviewJobInfo((prev) => ({
+        ...(prev || {}),
+        status: "cancel_requested",
+      }));
+
+      alert("검수 취소를 요청했습니다. 현재 처리 중인 단계가 끝나면 중단됩니다.");
+    } catch (error) {
+      console.error(error);
+      alert(`검수 취소 중 오류가 발생했습니다.\n${error.message}`);
+    } finally {
+      setCancelingReview(false);
+    }
+  };
+
   const runAiReview = async (mode = reviewTarget.targetScope, statusFilter = null) => {
     if (reviewRunning) return;
+
     const baseUrl = reviewTarget.reviewApiBase.replace(/\/$/, "");
-    let targetRows = getReviewRows(mode);
 
-    if (statusFilter === "uncheckedOrError") {
-      targetRows = targetRows.filter((row) => (row.reviewStatus || "").includes("미검수") || (row.reviewStatus || "").includes("오류"));
-    } else if (statusFilter === "errorOnly") {
-      targetRows = targetRows.filter((row) => (row.reviewStatus || "").includes("오류"));
-    } else if (statusFilter === "holdOnly") {
-      targetRows = targetRows.filter((row) => (row.reviewStatus || "").includes("보류"));
-    } else if (statusFilter === "normalOnly") {
-      targetRows = targetRows.filter((row) => (row.reviewStatus || "").includes("정상"));
-    }
-
-    if (!reviewTarget.targetMapId) {
-      alert("검수 대상 매핑을 먼저 선택해 주세요.");
+    if (!String(reviewTarget.courseName || "").trim()) {
+      alert("검수 실행 전에는 강좌명을 선택해 주세요.");
       return;
     }
-    if (!reviewTarget.courseName.trim() || !reviewTarget.setName.trim()) {
-      alert("선택된 매핑에 강좌명 또는 세트명이 없습니다. 매핑 DB를 확인해 주세요.");
+
+    const mapsToReview = selectedTargetMaps;
+
+    if (mapsToReview.length === 0) {
+      alert("선택한 조건에 맞는 검수 대상 매핑이 없습니다. 매핑 관리 화면을 확인해 주세요.");
       return;
     }
-    if (targetRows.length === 0) {
+
+    const jobTargets = mapsToReview
+      .map((targetMap) => {
+        const rowsForMap = filterRowsByReviewStatus(
+          getReviewRowsForMap(targetMap, mode),
+          statusFilter
+        );
+
+        return {
+          targetMap,
+          rowsForMap,
+        };
+      })
+      .filter((item) => item.rowsForMap.length > 0);
+
+    if (jobTargets.length === 0) {
       alert("검수할 문제가 없습니다. 선택한 매핑, 문제 범위, 체크 선택 상태를 확인해 주세요.");
       return;
     }
 
-    const proceed = window.confirm(`${targetRows.length}개 문제를 AI 검수 API로 보낼까요?`);
+    const invalidMap = jobTargets.find(({ targetMap }) => {
+      return !String(targetMap.course_name || "").trim() || !String(targetMap.exam_unique_no || "").trim();
+    });
+
+    if (invalidMap) {
+      alert("선택된 매핑 중 강좌명 또는 시험 고유 번호가 없는 항목이 있습니다. 매핑 DB를 확인해 주세요.");
+      return;
+    }
+
+    const totalQuestionCount = jobTargets.reduce((sum, item) => sum + item.rowsForMap.length, 0);
+
+    const proceed = window.confirm(
+      `${jobTargets.length}개 매핑의 총 ${totalQuestionCount}개 문제를 AI 검수 API로 보낼까요?`
+    );
+
     if (!proceed) return;
 
     setReviewRunning(true);
     setReviewJobInfo(null);
 
+    let totalReviewed = 0;
+    let totalIssues = 0;
+    let totalMappingErrors = 0;
+
     try {
-      const payload = buildReviewPayload(targetRows);
-      const createRes = await fetch(`${baseUrl}/review-jobs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!createRes.ok) {
-        const text = await createRes.text();
-        throw new Error(`검수 작업 생성 실패: ${createRes.status} ${text}`);
+      for (const { targetMap, rowsForMap } of jobTargets) {
+        const payload = buildReviewPayloadForMap(targetMap, rowsForMap);
+
+        const createRes = await fetch(`${baseUrl}/review-jobs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!createRes.ok) {
+          const text = await createRes.text();
+          throw new Error(`검수 작업 생성 실패: ${createRes.status} ${text}`);
+        }
+
+        const created = await createRes.json();
+        setReviewJobInfo(created);
+
+        const result = await waitForReviewResult(baseUrl, created.job_id);
+        await applyAiReviewResult(result);
+
+        totalReviewed += result.summary?.total_questions ?? 0;
+        totalIssues += result.summary?.issue_question_count ?? 0;
+        totalMappingErrors += result.summary?.mapping_error_count ?? 0;
       }
-      const created = await createRes.json();
-      setReviewJobInfo(created);
-      const result = await waitForReviewResult(baseUrl, created.job_id);
-      await applyAiReviewResult(result);
+
       await fetchQuestions();
-      alert(`AI 검수가 완료되었습니다. 전체 ${result.summary?.total_questions ?? 0}개 / 오류 ${result.summary?.issue_question_count ?? 0}개`);
+
+      alert(
+        [
+          "AI 검수가 완료되었습니다.",
+          `검수 매핑: ${jobTargets.length}개`,
+          `Claude 검수 문제: ${totalReviewed}개`,
+          `오류 문제: ${totalIssues}개`,
+          totalMappingErrors ? `매핑 오류: ${totalMappingErrors}개` : "",
+        ].filter(Boolean).join("\n")
+      );
     } catch (error) {
       console.error(error);
       alert(`AI 검수 중 오류가 발생했습니다.\n${error.message}`);
@@ -583,6 +1288,15 @@ function App() {
     const errorTypes = row.errorType && row.errorType !== "-"
       ? splitErrorTypes(row.errorType)
       : splitErrorTypes(getValue(raw, ["error_type", "issue_type", "errorType", "오류유형"], ""));
+
+    const answerValue =
+      row.answer ||
+      getValue(raw, ["answer", "정답"], "") ||
+      getValue(raw?.data, ["answer"], "");
+
+    const keywordsValue =
+      getValue(raw, ["keywords", "keyword", "키워드"], "") ||
+      getValue(raw?.data, ["keywords", "keyword"], "");
 
     setReviewQuestion(row);
     setEditForm({
@@ -603,9 +1317,12 @@ function App() {
       choice3_image_url: getValue(raw, ["choice3_image_url", "선지3 이미지 URL", "선택지3 이미지 URL"], ""),
       choice4_image_url: getValue(raw, ["choice4_image_url", "선지4 이미지 URL", "선택지4 이미지 URL"], ""),
       status: row.reviewStatus || getValue(raw, ["status", "review_status"], "완료"),
-      error_types: errorTypes,
+      error_types: normalizeErrorTypes(errorTypes),
       memo: row.reason !== "-" ? row.reason : getValue(raw, ["memo", "review_memo", "reason"], ""),
       reflect_status: row.reflectStatus || getValue(raw, ["reflect_status"], "미반영"),
+      answer: row.answer || getValue(raw, ["answer", "정답"], ""),
+      keywords: getValue(raw, ["keywords", "keyword", "키워드"], ""),
+
     });
   };
 
@@ -640,12 +1357,11 @@ function App() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          exam_unique_no: updated.exam_unique_no,
-          cd_value: updated.cd_value,
-          question_no: updated.question_no,
           question: updated.question,
           view_text: updated.view_text,
           image_url: updated.image_url,
+          answer: updated.answer || "",
+          keywords: updated.keywords || "",
           choice1: updated.choice1 || "",
           choice2: updated.choice2 || "",
           choice3: updated.choice3 || "",
@@ -670,24 +1386,65 @@ function App() {
     }
   };
 
-  const selectedTargetMap = targetMaps.find((item) => String(item.id) === String(reviewTarget.targetMapId));
-
   const renderTargetForm = () => (
     <section className="filter-card review-target-card">
       <div className="filter-section-title">검수 대상 지정</div>
       <div className="filter-grid review-target-grid compact-review-grid">
         <label className="field">
-          <span>검수 API 주소</span>
-          <input name="reviewApiBase" value={reviewTarget.reviewApiBase} onChange={handleReviewTargetChange} placeholder="예: http://192.168.219.167:8000" />
+          <span>강좌명 *</span>
+          <select
+            name="courseName"
+            value={reviewTarget.courseName}
+            onChange={handleReviewTargetChange}
+          >
+            <option value="">강좌명을 선택하세요</option>
+            {targetCourseOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
         </label>
-        <label className="field field-wide">
-          <span>검수 대상 매핑 <em className="field-hint">세트명+과목명 → 시험 고유 번호</em></span>
-          <select name="targetMapId" value={reviewTarget.targetMapId} onChange={handleReviewTargetChange}>
-            <option value="">검수 대상 매핑을 선택하세요</option>
-            {targetMaps.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.display_name || `${item.set_name || "세트"} / ${item.subtype_name || item.subject_name || item.exam_unique_no}`}
-              </option>
+
+        <label className="field">
+          <span>세트명 <em className="field-hint">선택 안 하면 전체</em></span>
+          <select
+            name="setName"
+            value={reviewTarget.setName}
+            onChange={handleReviewTargetChange}
+            disabled={!reviewTarget.courseName}
+          >
+            <option value="">전체 세트</option>
+            {targetSetOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field">
+          <span>과목명 <em className="field-hint">선택 안 하면 전체</em></span>
+          <select
+            name="subjectName"
+            value={reviewTarget.subjectName}
+            onChange={handleReviewTargetChange}
+            disabled={!reviewTarget.courseName}
+          >
+            <option value="">전체 과목</option>
+            {targetSubjectOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field">
+          <span>하위유형 <em className="field-hint">선택 안 하면 전체</em></span>
+          <select
+            name="subtypeName"
+            value={reviewTarget.subtypeName}
+            onChange={handleReviewTargetChange}
+            disabled={!reviewTarget.courseName}
+          >
+            <option value="">전체 하위유형</option>
+            {targetSubtypeOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
             ))}
           </select>
         </label>
@@ -702,29 +1459,39 @@ function App() {
             <option value="selected">체크 선택 문제 중 선택 매핑 기준</option>
           </select>
         </label>
-        <label className="field checkbox-field">
-          <span>raw_data 포함</span>
-          <label className="inline-check inline-check-full">
-            <input type="checkbox" name="includeRawData" checked={reviewTarget.includeRawData} onChange={handleReviewTargetChange} />
-            <em>결과 JSON에 원본 문제 데이터 포함</em>
-          </label>
-        </label>
       </div>
 
-      {selectedTargetMap ? (
-        <div className="review-status-line map-summary-line">
-          <strong>선택된 매핑</strong>
-          <span>강좌명: {selectedTargetMap.course_name || "-"}</span>
-          <span>세트명: {selectedTargetMap.set_name || "-"}</span>
-          <span>과목명: {selectedTargetMap.subject_name || "-"}</span>
-          <span>하위유형: {selectedTargetMap.subtype_name || "-"}</span>
-          <span>시험 고유 번호: {selectedTargetMap.exam_unique_no || "-"}</span>
-          <span>CD값: {selectedTargetMap.cd_value || "-"}</span>
-        </div>
+      {reviewTarget.courseName ? (
+        selectedTargetMaps.length > 0 ? (
+          <div className="review-status-line map-summary-line">
+            <strong>매칭된 검수 대상 {selectedTargetMaps.length}개</strong>
+
+            <span>강좌명: {reviewTarget.courseName}</span>
+            <span>세트명: {reviewTarget.setName || "전체"}</span>
+            <span>과목명: {reviewTarget.subjectName || "전체"}</span>
+            <span>하위유형: {reviewTarget.subtypeName || "전체"}</span>
+
+            <span>
+              시험 고유 번호:{" "}
+              {Array.from(
+                new Set(
+                  selectedTargetMaps
+                    .map((item) => String(item.exam_unique_no || "").trim())
+                    .filter(Boolean)
+                )
+              ).join(", ") || "-"}
+            </span>
+          </div>
+        ) : (
+          <div className="review-status-line map-summary-line muted-line">
+            <strong>매칭 없음</strong>
+            <span>선택한 조건에 맞는 검수 대상 매핑이 없습니다. 매핑 관리 화면을 확인해 주세요.</span>
+          </div>
+        )
       ) : (
         <div className="review-status-line map-summary-line muted-line">
-          <strong>매핑 미선택</strong>
-          <span>엑셀의 검수대상매핑 시트를 업로드한 뒤 검수 대상을 선택해 주세요.</span>
+          <strong>강좌명 미선택</strong>
+          <span>초기 화면에는 전체 문제가 표시됩니다. 검수 실행 전에는 강좌명을 선택해 주세요.</span>
         </div>
       )}
 
@@ -744,7 +1511,226 @@ function App() {
         <button className="btn btn-gray" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "holdOnly")} disabled={reviewRunning}>보류만 검수하기</button>
         <button className="btn btn-blue" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "normalOnly")} disabled={reviewRunning}>정상만 최종검수하기</button>
         <button className="btn btn-light" type="button" onClick={() => runAiReview(reviewTarget.targetScope, null)} disabled={reviewRunning}>선택 매핑 전체 검수</button>
+        <button className="btn btn-danger" type="button" onClick={cancelCurrentReview} disabled={!reviewRunning || !reviewJobInfo?.job_id || cancelingReview}> {cancelingReview ? "취소 요청 중" : "검수 취소"} </button>      
       </div>
+    </section>
+  );
+
+  const filteredTargetMaps = useMemo(() => {
+    const keyword = lower(targetMapSearch);
+
+    if (!keyword) {
+      return targetMaps;
+    }
+
+    return targetMaps.filter((item) => {
+      const targetText = lower([
+        item.id,
+        item.display_name,
+        item.course_name,
+        item.set_name,
+        item.subject_name,
+        item.subtype_name,
+        item.exam_unique_no,
+      ].join(" "));
+
+      return targetText.includes(keyword);
+    });
+  }, [targetMaps, targetMapSearch]);
+
+  const targetMapTotalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filteredTargetMaps.length / TARGET_MAP_PAGE_SIZE));
+  }, [filteredTargetMaps.length]);
+
+  const targetMapPageRows = useMemo(() => {
+    const startIndex = (targetMapPage - 1) * TARGET_MAP_PAGE_SIZE;
+    const endIndex = startIndex + TARGET_MAP_PAGE_SIZE;
+    return filteredTargetMaps.slice(startIndex, endIndex);
+  }, [filteredTargetMaps, targetMapPage]);
+
+  useEffect(() => {
+    if (targetMapPage > targetMapTotalPages) {
+      setTargetMapPage(targetMapTotalPages);
+    }
+  }, [targetMapPage, targetMapTotalPages]);
+
+  const handleTargetMapSearchChange = (event) => {
+    setTargetMapSearch(event.target.value);
+    setTargetMapPage(1);
+  };
+
+  const resetTargetMapSearch = () => {
+    setTargetMapSearch("");
+    setTargetMapPage(1);
+  };
+
+  const renderTargetMapManager = () => (
+    <section className="filter-card target-map-manager">
+      <div className="filter-section-title">검수 대상 매핑 직접 등록</div>
+
+      <div className="filter-grid target-map-form-grid">
+        <label className="field">
+          <span>강좌명 *</span>
+          <input
+            name="courseName"
+            value={targetMapForm.courseName}
+            onChange={handleTargetMapFormChange}
+            placeholder="예: SQLD 61회 끝장 패키지 PT 2026"
+          />
+        </label>
+
+        <label className="field">
+          <span>세트명 *</span>
+          <input
+            name="setName"
+            value={targetMapForm.setName}
+            onChange={handleTargetMapFormChange}
+            placeholder="예: 최신기출 문제"
+          />
+        </label>
+
+        <label className="field">
+          <span>과목명 *</span>
+          <input
+            name="subjectName"
+            value={targetMapForm.subjectName}
+            onChange={handleTargetMapFormChange}
+            placeholder="예: SQLD 25년 60회 기출복원문제"
+          />
+        </label>
+
+        <label className="field">
+          <span>하위유형</span>
+          <input
+            name="subtypeName"
+            value={targetMapForm.subtypeName}
+            onChange={handleTargetMapFormChange}
+            placeholder="sub_title이 있을 때만 입력"
+          />
+        </label>
+
+        <label className="field">
+          <span>시험 고유 번호 *</span>
+          <input
+            name="examUniqueNo"
+            value={targetMapForm.examUniqueNo}
+            onChange={handleTargetMapFormChange}
+            placeholder="예: 123"
+          />
+        </label>
+      </div>
+
+      <div className="filter-actions">
+        <button
+          className="btn btn-success"
+          type="button"
+          onClick={saveTargetMap}
+          disabled={targetMapSaving}
+        >
+          {targetMapForm.id ? "매핑 수정 저장" : "매핑 등록"}
+        </button>
+
+        <button
+          className="btn btn-light"
+          type="button"
+          onClick={resetTargetMapForm}
+          disabled={targetMapSaving}
+        >
+          입력 초기화
+        </button>
+
+        <button
+          className="btn btn-primary"
+          type="button"
+          onClick={fetchTargetMaps}
+          disabled={targetMapSaving}
+        >
+          매핑 새로고침
+        </button>
+      </div>
+
+      <div className="target-map-search-row">
+        <label className="field target-map-search-field">
+          <span>매핑 검색</span>
+          <input
+            value={targetMapSearch}
+            onChange={handleTargetMapSearchChange}
+            placeholder="강좌명, 세트명, 과목명, 하위유형, 시험 고유 번호 검색"
+          />
+        </label>
+
+        <button
+          className="btn btn-light"
+          type="button"
+          onClick={resetTargetMapSearch}
+        >
+          검색 초기화
+        </button>
+      </div>
+
+      <div className="target-map-list-wrap">
+        <table className="target-map-list-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>표시명</th>
+              <th>강좌명</th>
+              <th>세트명</th>
+              <th>과목명</th>
+              <th>하위유형</th>
+              <th>시험 고유 번호</th>
+              <th>관리</th>
+            </tr>
+          </thead>
+          <tbody>
+            {targetMaps.length === 0 ? (
+              <tr>
+                <td colSpan="8" className="empty-cell">
+                  등록된 검수 대상 매핑이 없습니다.
+                </td>
+              </tr>
+            ) : filteredTargetMaps.length === 0 ? (
+              <tr>
+                <td colSpan="8" className="empty-cell">
+                  검색 결과가 없습니다.
+                </td>
+              </tr>
+            ) : (
+              targetMapPageRows.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.id}</td>
+                  <td>{item.display_name || "-"}</td>
+                  <td>{item.course_name || "-"}</td>
+                  <td>{item.set_name || "-"}</td>
+                  <td>{item.subject_name || "-"}</td>
+                  <td>{item.subtype_name || "-"}</td>
+                  <td>{item.exam_unique_no || "-"}</td>
+                  <td>
+                    <div className="target-map-row-actions">
+                      <button
+                        className="btn btn-row"
+                        type="button"
+                        onClick={() => editTargetMap(item)}
+                      >
+                        수정
+                      </button>
+                      <button
+                        className="btn btn-danger btn-small"
+                        type="button"
+                        onClick={() => deleteTargetMap(item)}
+                      >
+                        삭제
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {renderTargetMapPagination()}
     </section>
   );
 
@@ -753,9 +1739,23 @@ function App() {
       <div className="filter-section-title">문제 목록 검색 조건</div>
       <div className="filter-grid">
         <label className="field">
+          <span>강좌명</span>
+          <select name="courseName" value={filters.courseName} onChange={handleFilterChange}>
+            {options.courseName.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
           <span>시험 고유 번호</span>
           <select name="examUniqueNo" value={filters.examUniqueNo} onChange={handleFilterChange}>
             {options.examUniqueNo.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>과목명</span>
+          <select name="subjectName" value={filters.subjectName} onChange={handleFilterChange}>
+            {options.subjectName.map((item) => <option key={item} value={item}>{item}</option>)}
           </select>
         </label>
         <label className="field">
@@ -782,10 +1782,6 @@ function App() {
             {options.reflectStatus.map((item) => <option key={item} value={item}>{item}</option>)}
           </select>
         </label>
-        <label className="field field-wide">
-          <span>검색</span>
-          <input name="search" value={filters.search} onChange={handleFilterChange} placeholder="IDX, 시험 고유 번호, CD값, 문제, 번호 검색" />
-        </label>
         <label className="field">
           <span>페이지당 개수</span>
           <select name="pageSize" value={filters.pageSize} onChange={handleFilterChange}>
@@ -793,6 +1789,10 @@ function App() {
             <option value="50">50개</option>
             <option value="100">100개</option>
           </select>
+        </label>
+        <label className="field field-wide">
+          <span>검색</span>
+          <input name="search" value={filters.search} onChange={handleFilterChange} placeholder="IDX, 강좌명, 시험 고유 번호, 과목명, CD값, 문제, 번호 검색" />
         </label>
       </div>
       <div className="filter-actions">
@@ -815,14 +1815,132 @@ function App() {
     </section>
   );
 
-  const renderQuestionTable = ({ rowsToShow, title, showCount = false, emptyText = "조회된 문제가 없습니다." }) => {
+  const renderTargetMapPagination = () => {
+    const totalCount = filteredTargetMaps.length;
+
+    const startNumber = totalCount === 0
+      ? 0
+      : (targetMapPage - 1) * TARGET_MAP_PAGE_SIZE + 1;
+
+    const endNumber = Math.min(targetMapPage * TARGET_MAP_PAGE_SIZE, totalCount);
+
+    return (
+      <div className="pagination-bar target-map-pagination">
+        <div className="pagination-info">
+          전체 {totalCount.toLocaleString()}건 중{" "}
+          {startNumber.toLocaleString()}-{endNumber.toLocaleString()} 표시
+        </div>
+
+        <div className="pagination-actions">
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setTargetMapPage(1)}
+            disabled={targetMapPage === 1}
+          >
+            처음
+          </button>
+
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setTargetMapPage((prev) => Math.max(1, prev - 1))}
+            disabled={targetMapPage === 1}
+          >
+            이전
+          </button>
+
+          <span className="pagination-current">
+            {targetMapPage.toLocaleString()} / {targetMapTotalPages.toLocaleString()}
+          </span>
+
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setTargetMapPage((prev) => Math.min(targetMapTotalPages, prev + 1))}
+            disabled={targetMapPage === targetMapTotalPages}
+          >
+            다음
+          </button>
+
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setTargetMapPage(targetMapTotalPages)}
+            disabled={targetMapPage === targetMapTotalPages}
+          >
+            마지막
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPagination = () => {
+    const startNumber = filteredRows.length === 0 ? 0 : (currentPage - 1) * pageSizeNumber + 1;
+    const endNumber = Math.min(currentPage * pageSizeNumber, filteredRows.length);
+
+    return (
+      <div className="pagination-bar">
+        <div className="pagination-info">
+          전체 {filteredRows.length.toLocaleString()}건 중{" "}
+          {startNumber.toLocaleString()}-{endNumber.toLocaleString()} 표시
+        </div>
+
+        <div className="pagination-actions">
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setCurrentPage(1)}
+            disabled={currentPage === 1}
+          >
+            처음
+          </button>
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+            disabled={currentPage === 1}
+          >
+            이전
+          </button>
+
+          <span className="pagination-current">
+            {currentPage.toLocaleString()} / {totalPages.toLocaleString()}
+          </span>
+
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+            disabled={currentPage === totalPages}
+          >
+            다음
+          </button>
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setCurrentPage(totalPages)}
+            disabled={currentPage === totalPages}
+          >
+            마지막
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderQuestionTable = ({rowsToShow, title, showCount = false, totalCount = null, emptyText = "조회된 문제가 없습니다.",}) => {
     const allVisibleChecked = rowsToShow.length > 0 && rowsToShow.every((row) => selectedRows.includes(row.rowKey));
 
     return (
       <section className="table-card">
         <div className="table-top">
           <div className="table-title">
-            {title}{showCount ? <> <strong>{rowsToShow.length.toLocaleString()}</strong>건</> : null}
+            {title}
+            {showCount ? (
+              <> <strong>{(totalCount ?? rowsToShow.length).toLocaleString()}</strong>건</>
+            ) : null}
           </div>
           <div className="table-actions">
             <button className="btn btn-light" type="button" onClick={() => handleBulkAction("정상 처리")}>선택 정상처리</button>
@@ -841,43 +1959,91 @@ function App() {
               <tr>
                 <th className="check-col"><input type="checkbox" checked={allVisibleChecked} onChange={(event) => toggleAll(event.target.checked, rowsToShow)} /></th>
                 <th>IDX</th>
-                <th>시험 고유 번호</th>
-                <th>CD값</th>
-                <th>번호</th>
+                <th>강좌명</th>
+                <th className="exam-no-col">시험 고유 번호</th>
+                <th>과목명</th>
+                <th className="cd-col">CD값</th>
+                <th className="number-col">번호</th>
                 <th>문제</th>
-                <th>검수상태</th>
+                <th className="review-status-col">검수상태</th>
                 <th>오류유형</th>
                 <th>기타사유</th>
-                <th>검수자</th>
+                <th className="reviewer-col">검수자</th>
                 <th>검수일</th>
                 <th>반영상태</th>
-                <th>관리</th>
+                <th className="manage-col">관리</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan="13" className="empty-cell">데이터를 불러오는 중입니다.</td></tr>
+                <tr><td colSpan="15" className="empty-cell">데이터를 불러오는 중입니다.</td></tr>
               ) : rowsToShow.length === 0 ? (
-                <tr><td colSpan="13" className="empty-cell">{emptyText}</td></tr>
+                <tr><td colSpan="15" className="empty-cell">{emptyText}</td></tr>
               ) : rowsToShow.map((row) => {
                 const errorTypes = splitErrorTypes(row.errorType);
                 return (
                   <tr key={row.rowKey}>
-                    <td className="check-col"><input type="checkbox" checked={selectedRows.includes(row.rowKey)} onChange={() => toggleRow(row.rowKey)} /></td>
+                    <td className="check-col">
+                      <input
+                        type="checkbox"
+                        checked={selectedRows.includes(row.rowKey)}
+                        onChange={() => toggleRow(row.rowKey)}
+                      />
+                    </td>
+
                     <td>{row.id}</td>
-                    <td>{row.examUniqueNo || "-"}</td>
-                    <td>{row.cdValue || "-"}</td>
-                    <td>{row.number}</td>
+                    <td>{row.courseName || "-"}</td>
+                    <td className="exam-no-col">{row.examUniqueNo || "-"}</td>
+                    <td>{row.subjectName || "-"}</td>
+                    <td className="cd-col">{row.cdValue || "-"}</td>
+                    <td className="number-col">{row.number}</td>
                     <td className="question-cell">{row.question}</td>
-                    <td><div className="status-box"><span className={`badge ${getStatusClass(row.reviewStatus)}`}>{row.reviewStatus}</span>{row.statusMemo && <small>{row.statusMemo}</small>}</div></td>
-                    <td><div className="pill-list">{errorTypes.length === 0 ? <span className="pill pill-muted">-</span> : errorTypes.map((type) => <span key={type} className="pill pill-error">{type}</span>)}</div></td>
-                    <td className="reason-cell">{row.reason}</td>
-                    <td>{row.reviewer}</td>
+
+                    <td className="review-status-col">
+                      <div className="status-box">
+                        <span className={`badge ${getStatusClass(row.reviewStatus)}`}>
+                          {row.reviewStatus}
+                        </span>
+                        {row.statusMemo && <small>{row.statusMemo}</small>}
+                      </div>
+                    </td>
+
+                    <td>
+                      <div className="pill-list">
+                        {errorTypes.length === 0 ? (
+                          <span className="pill pill-muted">-</span>
+                        ) : (
+                          errorTypes.map((type) => (
+                            <span key={type} className="pill pill-error">
+                              {type}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </td>
+
+                    <td className="reason-cell" title={row.reason}>
+                      <div className="reason-preview">{row.reason}</div>
+                    </td>
+                    <td className="reviewer-col">{row.reviewer}</td>
                     <td>{row.reviewedAt}</td>
-                    <td><span className={`reflect ${getReflectClass(row.reflectStatus)}`}>{row.reflectStatus}</span></td>
-                    <td><button className="btn btn-row" type="button" onClick={() => openReviewModal(row)}>검수하기</button></td>
-                  </tr>
-                );
+
+                    <td>
+                      <span className={`reflect ${getReflectClass(row.reflectStatus)}`}>
+                        {row.reflectStatus}
+                      </span>
+                    </td>
+
+                    <td className="manage-col">
+                      <button
+                        className="btn btn-row"
+                        type="button"
+                        onClick={() => openReviewModal(row)}
+                      >
+                        검수하기
+                      </button>
+                    </td>
+                  </tr>                );
               })}
             </tbody>
           </table>
@@ -890,11 +2056,38 @@ function App() {
     <div className="page">
       <header className="page-header">
         <div>
-          <h1>{pageMode === "review" ? "AI 검수 실행" : "문제 목록 검색"}</h1>
+          <h1>
+            {pageMode === "review"
+              ? "AI 검수 실행"
+              : pageMode === "list"
+                ? "문제 목록 검색"
+                : "검수 대상 매핑 관리"}
+          </h1>
         </div>
         <div className="header-actions">
-          <button className={`btn ${pageMode === "review" ? "btn-primary" : "btn-light"}`} type="button" onClick={() => setPageMode("review")}>검수 화면</button>
-          <button className={`btn ${pageMode === "list" ? "btn-primary" : "btn-light"}`} type="button" onClick={() => setPageMode("list")}>문제 목록 검색</button>
+          <button
+            className={`btn ${pageMode === "review" ? "btn-primary" : "btn-light"}`}
+            type="button"
+            onClick={() => setPageMode("review")}
+          >
+            검수 화면
+          </button>
+
+          <button
+            className={`btn ${pageMode === "list" ? "btn-primary" : "btn-light"}`}
+            type="button"
+            onClick={() => setPageMode("list")}
+          >
+            문제 목록 검색
+          </button>
+
+          <button
+            className={`btn ${pageMode === "map" ? "btn-primary" : "btn-light"}`}
+            type="button"
+            onClick={() => setPageMode("map")}
+          >
+            매핑 관리
+          </button>
           <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={handleExcelUpload} />
           <button className="btn btn-primary" type="button" onClick={() => fileInputRef.current?.click()}>엑셀 업로드</button>
         </div>
@@ -903,13 +2096,30 @@ function App() {
       {pageMode === "review" ? (
         <>
           {renderTargetForm()}
-          {renderQuestionTable({ rowsToShow: reviewTargetRows, title: "검수 대상 문제 내역", showCount: false, emptyText: "선택한 검수 대상 매핑에 해당하는 문제가 없습니다. 매핑 DB와 문제 DB의 시험 고유 번호를 확인해 주세요." })}
+          {renderQuestionTable({
+            rowsToShow: reviewTargetRows,
+            title: "검수 대상 문제 내역 ",
+            showCount: true,
+            totalCount: reviewTargetRows.length,
+            emptyText: "표시할 문제가 없습니다. 매핑 DB와 문제 DB의 시험 고유 번호를 확인해 주세요.",
+          })}
         </>
-      ) : (
+      ) : pageMode === "list" ? (
         <>
           {renderStats()}
           {renderSearchFilters()}
-          {renderQuestionTable({ rowsToShow: pageRows, title: "문제 목록 ", showCount: true, emptyText: "조회된 문제가 없습니다." })}
+          {renderQuestionTable({
+            rowsToShow: pageRows,
+            title: "문제 목록 ",
+            showCount: true,
+            totalCount: filteredRows.length,
+            emptyText: "조회된 문제가 없습니다.",
+          })}
+          {renderPagination()}
+        </>
+      ) : (
+        <>
+          {renderTargetMapManager()}
         </>
       )}
 
@@ -927,6 +2137,7 @@ function App() {
             </div>
             <div className="review-modal-body">
               <section className="review-panel original-panel">
+                <div className="panel-title">검수 문제</div>
                 <div className="info-grid">
                   <div><span>시험 고유 번호</span><strong>{editForm.exam_unique_no || "-"}</strong></div>
                   <div><span>CD값</span><strong>{editForm.cd_value || "-"}</strong></div>
@@ -934,38 +2145,60 @@ function App() {
                   <div><span>검수상태</span><strong>{editForm.status || "-"}</strong></div>
                 </div>
                 <h3>문제</h3><div className="readonly-box">{editForm.question || "문제 없음"}</div>
-                <h3>보기</h3><div className="readonly-box muted">{editForm.view_text || "보기 없음"}</div>
-                <h3>보기 이미지</h3><div className="readonly-box muted">{editForm.image_url || "보기 이미지 없음"}</div>
-                <h3>선지</h3>
-                <div className="choice-list">
-                  {[editForm.choice1, editForm.choice2, editForm.choice3, editForm.choice4].filter(Boolean).map((choice, index) => (
-                    <div className="choice-item" key={`${choice}-${index}`}><span>{index + 1}</span><p>{choice}</p></div>
-                  ))}
+                <h3>보기</h3><div className={`readonly-box ${editForm.view_text ? "has-value" : "muted"}`}> {editForm.view_text || "보기 없음"}</div>
+                <h3>보기 이미지</h3><div className={`readonly-box ${editForm.image_url ? "has-value" : "muted"}`}> {editForm.image_url || "보기 이미지 없음"}</div>
+                <h3>정답</h3>
+                <div className={`readonly-box ${editForm.answer && editForm.answer !== "-" ? "has-value" : "muted"}`}>
+                  {editForm.answer || "-"}
+                </div>
+
+                <h3>키워드</h3>
+                <div className={`readonly-box ${editForm.keywords && editForm.keywords !== "-" ? "has-value" : "muted"}`}>
+                  {editForm.keywords || "-"}
+                </div>
+                <h3>선지</h3><div className="choice-list">{[editForm.choice1, editForm.choice2, editForm.choice3, editForm.choice4].filter(Boolean).map((choice, index) => (<div className="choice-item" key={`${choice}-${index}`}><span>{index + 1}</span><p>{choice}</p></div>))}
                 </div>
                 <h3>검수 사유</h3><div className="readonly-box">{editForm.reason || editForm.memo || "-"}</div>
               </section>
               <section className="review-panel edit-panel">
-                <h3>수정</h3>
-                <div className="edit-grid">
-                  <label>시험 고유 번호<input name="exam_unique_no" value={editForm.exam_unique_no} onChange={handleEditChange} /></label>
-                  <label>CD값<input name="cd_value" value={editForm.cd_value} onChange={handleEditChange} /></label>
-                  <label>문제번호<input name="question_no" value={editForm.question_no} onChange={handleEditChange} /></label>
+                <div className="panel-title">수정</div>
+
+                <div className="edit-grid answer-keyword-grid">
+                  <label className="answer-field">
+                    정답
+                    <input
+                      name="answer"
+                      value={editForm.answer || ""}
+                      onChange={handleEditChange}
+                    />
+                  </label>
+
+                  <label className="keyword-field">
+                    키워드
+                    <input
+                      name="keywords"
+                      value={editForm.keywords || ""}
+                      onChange={handleEditChange}
+                    />
+                  </label>
                 </div>
+
                 <label className="full-field">문제<textarea name="question" value={editForm.question} onChange={handleEditChange} /></label>
                 <label className="full-field">보기<textarea name="view_text" value={editForm.view_text} onChange={handleEditChange} /></label>
-                <label className="full-field">보기 이미지 URL<textarea name="image_url" value={editForm.image_url} onChange={handleEditChange} /></label>
+                <label className="full-field"> 보기 이미지 URL <input className="single-line-input" name="image_url" value={editForm.image_url} onChange={handleEditChange} /> </label>
                 <div className="choice-edit-group">
                   <label className="full-field">선지1<textarea name="choice1" value={editForm.choice1} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지1 이미지 URL<textarea name="choice1_image_url" value={editForm.choice1_image_url} onChange={handleEditChange} /></label>
+                  <label className="full-field">선지1 이미지 URL<input className="single-line-input" name="choice1_image_url" value={editForm.choice1_image_url} onChange={handleEditChange} /></label>
                   <label className="full-field">선지2<textarea name="choice2" value={editForm.choice2} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지2 이미지 URL<textarea name="choice2_image_url" value={editForm.choice2_image_url} onChange={handleEditChange} /></label>
+                  <label className="full-field">선지2 이미지 URL<input className="single-line-input" name="choice2_image_url" value={editForm.choice2_image_url} onChange={handleEditChange} /></label>
                   <label className="full-field">선지3<textarea name="choice3" value={editForm.choice3} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지3 이미지 URL<textarea name="choice3_image_url" value={editForm.choice3_image_url} onChange={handleEditChange} /></label>
+                  <label className="full-field">선지3 이미지 URL<input className="single-line-input" name="choice3_image_url" value={editForm.choice3_image_url} onChange={handleEditChange} /></label>
                   <label className="full-field">선지4<textarea name="choice4" value={editForm.choice4} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지4 이미지 URL<textarea name="choice4_image_url" value={editForm.choice4_image_url} onChange={handleEditChange} /></label>
+                  <label className="full-field">선지4 이미지 URL<input className="single-line-input"   name="choice4_image_url" value={editForm.choice4_image_url} onChange={handleEditChange} /></label>
                 </div>
               </section>
               <aside className="review-panel side-panel">
+                <div className="panel-title">검수 내용</div>
                 <label className="full-field">검수 상태<select name="status" value={editForm.status} onChange={handleEditChange}><option value="완료">완료</option><option value="정상">정상</option><option value="오류있음">오류있음</option><option value="보류">보류</option><option value="검수중">검수중</option></select></label>
                 <h3>오류 유형 다중 선택</h3>
                 <div className="error-type-columns">

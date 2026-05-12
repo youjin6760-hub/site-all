@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -9,12 +10,30 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from collect_api import collect_from_target
-from claude_api import ERROR_CODES, review_job_dir
+from claude_api import ERROR_CODES, review_raw_files
+from site_api.main import app as question_api_app
 
 APP_ROOT = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent)).resolve()
 JOBS_DIR = Path(os.getenv("JOBS_DIR", APP_ROOT / "jobs")).resolve()
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
+RAW_DIR = APP_ROOT / "raw"
+REVIEWED_DIR = APP_ROOT / "reviewed_json"
+IMG_DIR = APP_ROOT / "images"
+DEBUG_DIR = APP_ROOT / "debug"
 
+ISSUE_XLSX_PATH = APP_ROOT / "claude.xlsx"
+FORMULA_XLSX_PATH = APP_ROOT / "exclaude.xlsx"
+
+
+def clear_folder(folder: Path) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+
+    for item in folder.iterdir():
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+            
 app = FastAPI(
     title="Question Review API",
     version="1.0.0",
@@ -24,12 +43,21 @@ app = FastAPI(
 # 같은 도메인에서만 호출한다면 CORS 설정은 더 좁게 제한해도 됩니다.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://192.168.219.167:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+for route in question_api_app.router.routes:
+    route_path = getattr(route, "path", "")
+
+    if route_path.startswith("/api/"):
+        app.router.routes.append(route)
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -44,7 +72,22 @@ def job_dir(job_id: str) -> Path:
         raise HTTPException(status_code=400, detail="job_id 형식이 올바르지 않습니다.")
     return JOBS_DIR / job_id
 
+class JobCancelled(RuntimeError):
+    pass
 
+
+def cancel_file(job_id: str) -> Path:
+    return job_dir(job_id) / "cancel.requested"
+
+
+def is_cancel_requested(job_id: str) -> bool:
+    return cancel_file(job_id).exists()
+
+
+def raise_if_cancelled(job_id: str) -> None:
+    if is_cancel_requested(job_id):
+        raise JobCancelled("사용자가 검수 작업을 취소했습니다.")
+    
 def write_json(path: Path, data: dict[str, Any] | list[Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -71,11 +114,29 @@ def update_status(job_path: Path, status: str, **extra: Any) -> None:
     current["status"] = status
     current["updated_at"] = now_iso()
 
-    if status in {"completed", "failed"}:
+    if status in {"completed", "failed", "canceled"}:
         current.setdefault("completed_at", now_iso())
 
     write_json(status_path, current)
 
+
+def db_now_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def normalize_question_no(value: Any) -> str:
+    if value is None:
+        return ""
+
+    text_value = str(value).strip()
+    if not text_value:
+        return ""
+
+    try:
+        return str(int(float(text_value)))
+    except Exception:
+        return text_value
+   
 
 def get_question_site_meta_map(target: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """
@@ -99,13 +160,15 @@ def get_question_site_meta_map(target: dict[str, Any]) -> dict[str, dict[str, An
             continue
 
         qno = q.get("question_no") or q.get("no")
-        if qno is None:
+        qno_key = normalize_question_no(qno)
+
+        if not qno_key:
             continue
 
         site_id = q.get("site_question_id") or q.get("site_problem_id") or q.get("idx") or q.get("id")
         exam_unique_no = q.get("exam_unique_no") or default_exam_unique_no
 
-        mapping[str(int(qno))] = {
+        mapping[qno_key] = {
             "site_question_id": site_id,
             "exam_unique_no": exam_unique_no,
             "source_question": q,
@@ -170,7 +233,8 @@ def build_site_result(job_id: str, target: dict[str, Any], reviewed_questions: l
             low_count += 1
 
         qno = reviewed.get("question_no")
-        site_meta = site_meta_map.get(str(qno), {})
+        qno_key = normalize_question_no(qno)
+        site_meta = site_meta_map.get(qno_key, {})
         issues = normalize_issues(reviewed)
 
         item = {
@@ -243,14 +307,45 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
         headless = bool(headless)
 
     try:
+        raise_if_cancelled(job_id)
+
         update_status(job_path, "collecting")
-        collect_from_target(target, job_id=job_id, job_dir=job_path, headless=headless)
+
+        # 이전 실행 결과가 섞이지 않도록 루트 결과 폴더를 비웁니다.
+        clear_folder(RAW_DIR)
+        clear_folder(REVIEWED_DIR)
+        clear_folder(IMG_DIR)
+        clear_folder(DEBUG_DIR)
+
+        for xlsx_path in [ISSUE_XLSX_PATH, FORMULA_XLSX_PATH]:
+            if xlsx_path.exists():
+                xlsx_path.unlink()
+
+        # job_dir를 넘기지 않으면 collect_api.py가 기존 루트 raw/debug/images 폴더를 사용합니다.
+        collect_from_target(
+            target,
+            job_id=None,
+            job_dir=None,
+            headless=headless,
+            cancel_checker=lambda: raise_if_cancelled(job_id),
+        )
+
+        raise_if_cancelled(job_id)
 
         update_status(job_path, "reviewing")
-        reviewed_questions = review_job_dir(
-            job_path,
+
+        raw_files = sorted(RAW_DIR.glob("*.json"))
+
+        reviewed_questions = review_raw_files(
+            raw_files=raw_files,
+            reviewed_dir=REVIEWED_DIR,
+            issue_xlsx_path=ISSUE_XLSX_PATH,
+            formula_xlsx_path=FORMULA_XLSX_PATH,
             write_excel=bool(options.get("write_excel", True)),
+            cancel_checker=lambda: raise_if_cancelled(job_id),
         )
+
+        raise_if_cancelled(job_id)
 
         if not reviewed_questions:
             raise RuntimeError(
@@ -258,7 +353,12 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
             )
 
         result = build_site_result(job_id, target, reviewed_questions)
+
+        # 프론트 상태 조회용
         write_json(job_path / "result.json", result)
+
+        # 사람이 바로 보기 쉬운 루트 결과 파일
+        write_json(APP_ROOT / "result.json", result)
 
         update_status(
             job_path,
@@ -268,11 +368,17 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
         )
         return result
 
+    except JobCancelled as e:
+        update_status(job_path, "canceled", error_message=str(e))
+        return {
+            "job_id": job_id,
+            "status": "canceled",
+            "message": str(e),
+        }
+
     except Exception as e:
         update_status(job_path, "failed", error_message=str(e))
         raise
-
-
 @app.get("/health")
 def health():
     return {"ok": True, "time": now_iso()}
@@ -322,6 +428,38 @@ def run_review_job_now(target: dict[str, Any]):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
+@app.post("/review-jobs/{job_id}/cancel")
+def cancel_review_job(job_id: str):
+    job_path = job_dir(job_id)
+    status_path = job_path / "status.json"
+
+    if not status_path.exists():
+        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
+
+    current = read_json(status_path)
+    current_status = current.get("status")
+
+    if current_status in {"completed", "failed", "canceled"}:
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "status": current_status,
+            "message": "이미 종료된 작업입니다.",
+        }
+
+    cancel_file(job_id).write_text(now_iso(), encoding="utf-8")
+
+    update_status(
+        job_path,
+        "cancel_requested",
+        cancel_requested_at=now_iso(),
+    )
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": "cancel_requested",
+    }
 
 @app.get("/review-jobs/{job_id}")
 def get_review_job(job_id: str):
@@ -339,3 +477,4 @@ def list_raw_files(job_id: str):
     if not raw_dir.exists():
         return {"job_id": job_id, "files": []}
     return {"job_id": job_id, "files": sorted(p.name for p in raw_dir.glob("*.json"))}
+
