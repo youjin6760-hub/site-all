@@ -12,17 +12,17 @@ from typing import Any
 
 
 ROOT = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent)).resolve()
+
 JOBS_DIR = Path(os.getenv("JOBS_DIR", ROOT / "jobs")).resolve()
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 RAW_DIR = Path(os.getenv("RAW_DIR", ROOT / "raw")).resolve()
-RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 DEBUG_DIR = Path(os.getenv("DEBUG_DIR", ROOT / "debug")).resolve()
-DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+DEBUG_ENABLED = os.getenv("DEBUG_ENABLED", "false").lower() == "true"
+DEBUG_SAVE_KEYWORDS = ("fail", "error", "not_found", "timeout", "failed")
 
 IMG_DIR = Path(os.getenv("IMG_DIR", ROOT / "images")).resolve()
-IMG_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET_MAIN_URL = "https://www.dataedupt.kr/sub/main/main.php"
 ALLOWED_HOSTS = {
@@ -241,6 +241,13 @@ def is_allowed_url(url: str) -> bool:
 
 
 def save_debug(page, name="debug"):
+    # DEBUG_ENABLED=true이면 모든 debug를 저장합니다.
+    # 기본값 false에서는 오류성 debug만 저장합니다.
+    should_save = DEBUG_ENABLED or any(keyword in name for keyword in DEBUG_SAVE_KEYWORDS)
+
+    if not should_save:
+        return
+
     try:
         screenshot_path = DEBUG_DIR / f"{name}.png"
         html_path = DEBUG_DIR / f"{name}.html"

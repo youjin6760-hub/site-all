@@ -1,7 +1,7 @@
 services:
-  question-review-api:
+  backend:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
 
     image: question-review-api:latest
@@ -11,15 +11,34 @@ services:
       - "8000:8000"
 
     env_file:
-      - .env
+      - ./backend/.env
 
     environment:
       APP_ROOT: /app
       JOBS_DIR: /app/jobs
 
     volumes:
-      - .:/app
+      - ./backend:/app
 
     command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_QUESTION_API_BASE: http://192.168.219.167:8000
+        VITE_REVIEW_API_BASE: http://192.168.219.167:8000
+
+    image: question-review-frontend:latest
+    container_name: question-review-frontend
+
+    ports:
+      - "5173:80"
+
+    depends_on:
+      - backend
 
     restart: unless-stopped

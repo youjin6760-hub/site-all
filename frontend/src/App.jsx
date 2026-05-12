@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import "./App.css";
 
 const API_BASE = import.meta.env.VITE_QUESTION_API_BASE || "http://192.168.219.167:8000";
@@ -112,12 +113,6 @@ function parseMaybeJson(value) {
 function toNumber(value) {
   const n = Number(String(value ?? "").trim());
   return Number.isFinite(n) ? n : null;
-}
-
-function makeJobId(prefix = "site_review") {
-  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
-  const rand = Math.random().toString(16).slice(2, 8);
-  return `${prefix}_${stamp}_${rand}`;
 }
 
 function uniqueJoin(values) {
@@ -341,6 +336,7 @@ function mapQuestion(item, index) {
     statusMemo: toText(pick(merged, ["status_memo", "review_memo", "status_detail", "result_detail"], ""), ""),
     errorType: toText(pick(merged, ["error_type", "issue_type", "errorType", "오류유형"]), "-"),
     reason: toText(pick(merged, ["reason", "etc_reason", "other_reason", "기타사유"], "-"), "-"),
+    suggestion: toText(pick(merged, ["suggestion", "review_suggestion", "수정제안", "수정 제안"], ""), ""),
     reviewer: toText(pick(merged, ["reviewer", "inspector", "검수자"]), "admin"),
     reviewedAt: toText(pick(merged, ["reviewed_at", "review_date", "checked_at", "검수일"]), "-"),
     reflectStatus: toText(pick(merged, ["reflect_status", "reflection_status", "apply_status", "반영상태"]), "미반영"),
@@ -357,6 +353,7 @@ function App() {
   const fileInputRef = useRef(null);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [currentPage, setCurrentPage] = useState(1);
+  const [reviewCurrentPage, setReviewCurrentPage] = useState(1);
   const [reviewTarget, setReviewTarget] = useState(DEFAULT_REVIEW_TARGET);
   const [targetMapForm, setTargetMapForm] = useState(DEFAULT_TARGET_MAP_FORM);
   const [targetMapSearch, setTargetMapSearch] = useState("");
@@ -381,7 +378,7 @@ function App() {
       setSelectedRows([]);
     } catch (error) {
       console.error(error);
-      setLoadError("문제 데이터를 불러오지 못했습니다. site_api 서버 실행 여부를 확인하세요.");
+      setLoadError("문제 데이터를 불러오지 못했습니다. backend 서버 실행 여부를 확인하세요.");
       setQuestions([]);
     } finally {
       setLoading(false);
@@ -648,16 +645,82 @@ function App() {
     setSelectedRows((prev) => prev.includes(rowKey) ? prev.filter((key) => key !== rowKey) : [...prev, rowKey]);
   };
 
-  const handleBulkAction = (label) => {
-    if (selectedRows.length === 0) {
+  const handleBulkAction = async (action) => {
+    const selectedItems = rows.filter((row) => selectedRows.includes(row.rowKey));
+
+    if (selectedItems.length === 0) {
       alert("선택된 문제가 없습니다.");
       return;
     }
-    alert(`${selectedRows.length}개 문제를 '${label}' 처리합니다.`);
+
+    const confirmMessage =
+      action === "정상"
+        ? `${selectedItems.length}개 문제를 정상 처리하시겠습니까?\n오류유형, Reason, Suggestion은 비워집니다.`
+        : `${selectedItems.length}개 문제를 보류 처리하시겠습니까?`;
+
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      if (action === "정상") {
+        await Promise.all(
+          selectedItems.map((row) =>
+            fetch(`${API_BASE}/api/questions/${row.id}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                review_status: "정상",
+                error_type: "",
+                reason: "",
+                suggestion: "",
+                reviewer: "admin",
+                reflect_status: "미반영",
+              }),
+            }).then((res) => {
+              if (!res.ok) {
+                throw new Error(`정상 처리 실패: ID ${row.id}`);
+              }
+              return res.json();
+            })
+          )
+        );
+      }
+
+      if (action === "보류") {
+        await Promise.all(
+          selectedItems.map((row) =>
+            fetch(`${API_BASE}/api/questions/${row.id}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                review_status: "보류",
+                reviewer: "admin",
+                reflect_status: "미반영",
+              }),
+            }).then((res) => {
+              if (!res.ok) {
+                throw new Error(`보류 처리 실패: ID ${row.id}`);
+              }
+              return res.json();
+            })
+          )
+        );
+      }
+
+      await fetchQuestions();
+      setSelectedRows([]);
+
+      alert(`${selectedItems.length}개 문제가 ${action} 처리되었습니다.`);
+    } catch (error) {
+      console.error(error);
+      alert(error.message || "선택 처리 중 오류가 발생했습니다.");
+    }
   };
 
   const handleReviewTargetChange = (event) => {
     const { name, value, type, checked } = event.target;
+    setReviewCurrentPage(1);
 
     if (name === "courseName") {
       setReviewTarget((prev) => ({
@@ -1006,6 +1069,23 @@ const targetSubtypeOptions = useMemo(() => {
   };
 
   const reviewTargetRows = getReviewRows(reviewTarget.targetScope);
+  const REVIEW_TARGET_PAGE_SIZE = 20;
+
+  const reviewTargetTotalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(reviewTargetRows.length / REVIEW_TARGET_PAGE_SIZE));
+  }, [reviewTargetRows.length]);
+
+  const reviewTargetPageRows = useMemo(() => {
+    const startIndex = (reviewCurrentPage - 1) * REVIEW_TARGET_PAGE_SIZE;
+    const endIndex = startIndex + REVIEW_TARGET_PAGE_SIZE;
+    return reviewTargetRows.slice(startIndex, endIndex);
+  }, [reviewTargetRows, reviewCurrentPage]);
+
+  useEffect(() => {
+    if (reviewCurrentPage > reviewTargetTotalPages) {
+      setReviewCurrentPage(reviewTargetTotalPages);
+    }
+  }, [reviewCurrentPage, reviewTargetTotalPages]);
 
   const buildReviewPayloadForMap = (targetMap, targetRows) => {
     const numbers = targetRows
@@ -1026,7 +1106,6 @@ const targetSubtypeOptions = useMemo(() => {
     }
 
     return {
-      job_id: makeJobId(),
       course_name: String(targetMap.course_name || "").trim(),
       set_name: String(targetMap.set_name || "").trim(),
       subject_name: String(targetMap.subject_name || "").trim() || undefined,
@@ -1036,11 +1115,31 @@ const targetSubtypeOptions = useMemo(() => {
       subject_start_index: Number(targetMap.subject_start_index) || 1,
       subject_end_index: Number(targetMap.subject_end_index) || 1,
       question_range: questionRange,
+      question_numbers: numbers,
       questions: targetRows.map((row) => ({
         site_question_id: toNumber(row.id),
         exam_unique_no: defaultExamUniqueNo,
         question_no: toNumber(row.number),
       })),
+      options: {
+        headless: true,
+        write_excel: true,
+        include_raw_data: true,
+      },
+    };
+  };
+
+  const buildCombinedReviewPayload = (jobTargets) => {
+    const targets = jobTargets.map(({ targetMap, rowsForMap }) =>
+      buildReviewPayloadForMap(targetMap, rowsForMap)
+    );
+
+    const configs = targets.map(({ options, ...config }) => config);
+
+    return {
+      course_name: String(reviewTarget.courseName || "").trim(),
+      review_mode: "batch",
+      targets: configs,
       options: {
         headless: true,
         write_excel: true,
@@ -1086,11 +1185,17 @@ const targetSubtypeOptions = useMemo(() => {
         : "";
 
       const reason = hasIssue
-        ? issues.map((issue, index) => {
-            const title = `[${index + 1}] ${issue.issue_area || ""} / ${issue.issue_type || ""}`.trim();
-            const suggestion = issue.suggestion ? `\n수정 제안: ${issue.suggestion}` : "";
-            return `${title}\n${issue.reason || ""}${suggestion}`;
-          }).join("\n\n")
+        ? issues
+            .map((issue) => issue.reason || "")
+            .filter(Boolean)
+            .join("\n\n")
+        : "";
+
+      const suggestion = hasIssue
+        ? issues
+            .map((issue) => issue.suggestion || "")
+            .filter(Boolean)
+            .join("\n\n")
         : "";
 
       const res = await fetch(`${API_BASE}/api/questions/${siteQuestionId}`, {
@@ -1100,6 +1205,7 @@ const targetSubtypeOptions = useMemo(() => {
           review_status: hasIssue ? "오류있음" : "정상",
           error_type: errorType,
           reason,
+          suggestion,
           reviewer: "AI검수",
           reflect_status: "미반영",
         }),
@@ -1238,9 +1344,8 @@ const targetSubtypeOptions = useMemo(() => {
     let totalIssues = 0;
     let totalMappingErrors = 0;
 
-    try {
-      for (const { targetMap, rowsForMap } of jobTargets) {
-        const payload = buildReviewPayloadForMap(targetMap, rowsForMap);
+      try {
+        const payload = buildCombinedReviewPayload(jobTargets);
 
         const createRes = await fetch(`${baseUrl}/review-jobs`, {
           method: "POST",
@@ -1259,22 +1364,22 @@ const targetSubtypeOptions = useMemo(() => {
         const result = await waitForReviewResult(baseUrl, created.job_id);
         await applyAiReviewResult(result);
 
-        totalReviewed += result.summary?.total_questions ?? 0;
-        totalIssues += result.summary?.issue_question_count ?? 0;
-        totalMappingErrors += result.summary?.mapping_error_count ?? 0;
-      }
+        totalReviewed = result.summary?.total_questions ?? 0;
+        totalIssues = result.summary?.issue_question_count ?? 0;
+        totalMappingErrors = result.summary?.mapping_error_count ?? 0;
 
-      await fetchQuestions();
+        await fetchQuestions();
 
-      alert(
-        [
-          "AI 검수가 완료되었습니다.",
-          `검수 매핑: ${jobTargets.length}개`,
-          `Claude 검수 문제: ${totalReviewed}개`,
-          `오류 문제: ${totalIssues}개`,
-          totalMappingErrors ? `매핑 오류: ${totalMappingErrors}개` : "",
-        ].filter(Boolean).join("\n")
-      );
+        alert(
+          [
+            "AI 검수가 완료되었습니다.",
+            "검수 작업: 1개",
+            `검수 매핑: ${jobTargets.length}개`,
+            `ChatGPT 검수 문제: ${totalReviewed}개`,
+            `오류 문제: ${totalIssues}개`,
+            totalMappingErrors ? `매핑 오류: ${totalMappingErrors}개` : "",
+          ].filter(Boolean).join("\n")
+        );
     } catch (error) {
       console.error(error);
       alert(`AI 검수 중 오류가 발생했습니다.\n${error.message}`);
@@ -1318,6 +1423,8 @@ const targetSubtypeOptions = useMemo(() => {
       choice4_image_url: getValue(raw, ["choice4_image_url", "선지4 이미지 URL", "선택지4 이미지 URL"], ""),
       status: row.reviewStatus || getValue(raw, ["status", "review_status"], "완료"),
       error_types: normalizeErrorTypes(errorTypes),
+      reason: row.reason !== "-" ? row.reason : getValue(raw, ["reason", "기타사유"], ""),
+      suggestion: row.suggestion || getValue(raw, ["suggestion", "review_suggestion", "수정제안", "수정 제안"], ""),
       memo: row.reason !== "-" ? row.reason : getValue(raw, ["memo", "review_memo", "reason"], ""),
       reflect_status: row.reflectStatus || getValue(raw, ["reflect_status"], "미반영"),
       answer: row.answer || getValue(raw, ["answer", "정답"], ""),
@@ -1344,12 +1451,18 @@ const targetSubtypeOptions = useMemo(() => {
   };
 
   const saveReview = async (nextStatus) => {
+    if (!editForm?.id) {
+      alert("저장할 문제 ID가 없습니다.");
+      return;
+    }
+
     const updated = {
       ...editForm,
       review_status: nextStatus || editForm.status,
       status: nextStatus || editForm.status,
       error_type: (editForm.error_types || []).join(", "),
-      reason: editForm.memo,
+      reason: editForm.reason || "",
+      suggestion: editForm.suggestion || "",
     };
 
     try {
@@ -1357,27 +1470,19 @@ const targetSubtypeOptions = useMemo(() => {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          question: updated.question,
-          view_text: updated.view_text,
-          image_url: updated.image_url,
-          answer: updated.answer || "",
-          keywords: updated.keywords || "",
-          choice1: updated.choice1 || "",
-          choice2: updated.choice2 || "",
-          choice3: updated.choice3 || "",
-          choice4: updated.choice4 || "",
-          choice1_image_url: updated.choice1_image_url || "",
-          choice2_image_url: updated.choice2_image_url || "",
-          choice3_image_url: updated.choice3_image_url || "",
-          choice4_image_url: updated.choice4_image_url || "",
           review_status: updated.review_status,
           error_type: updated.error_type,
           reason: updated.reason,
+          suggestion: updated.suggestion,
           reviewer: "admin",
           reflect_status: updated.reflect_status || "미반영",
         }),
       });
-      if (!res.ok) throw new Error("DB 저장 실패");
+
+      if (!res.ok) {
+        throw new Error("DB 저장 실패");
+      }
+
       await fetchQuestions();
       closeReviewModal();
     } catch (error) {
@@ -1386,6 +1491,7 @@ const targetSubtypeOptions = useMemo(() => {
     }
   };
 
+  
   const renderTargetForm = () => (
     <section className="filter-card review-target-card">
       <div className="filter-section-title">검수 대상 지정</div>
@@ -1449,7 +1555,7 @@ const targetSubtypeOptions = useMemo(() => {
           </select>
         </label>
         <label className="field">
-          <span>문제 범위 (선택)</span>
+          <span>문제 범위 (선택, 예: 1-10)</span>
           <input name="questionRange" value={reviewTarget.questionRange} onChange={handleReviewTargetChange} placeholder="비우면 선택 매핑 전체" />
         </label>
         <label className="field">
@@ -1505,11 +1611,11 @@ const targetSubtypeOptions = useMemo(() => {
 
       <div className="filter-actions">
         <button className="btn btn-primary" type="button" onClick={() => { fetchQuestions(); fetchTargetMaps(); }} disabled={reviewRunning}>DB 새로고침</button>
-        <button className="btn btn-light" type="button" onClick={() => setReviewTarget(DEFAULT_REVIEW_TARGET)} disabled={reviewRunning}>입력 초기화</button>
+        <button className="btn btn-light" type="button" onClick={() => { setReviewTarget(DEFAULT_REVIEW_TARGET); setReviewCurrentPage(1);}} disabled={reviewRunning}> 입력 초기화 </button>
         <button className="btn btn-success" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "uncheckedOrError")} disabled={reviewRunning}>{reviewRunning ? "검수 진행중" : "미검수/오류 문제 검수하기"}</button>
         <button className="btn btn-warning" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "errorOnly")} disabled={reviewRunning}>오류있음만 검수하기</button>
         <button className="btn btn-gray" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "holdOnly")} disabled={reviewRunning}>보류만 검수하기</button>
-        <button className="btn btn-blue" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "normalOnly")} disabled={reviewRunning}>정상만 최종검수하기</button>
+        <button className="btn btn-blue" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "normalOnly")} disabled={reviewRunning}>정상 문제 재검수하기</button>
         <button className="btn btn-light" type="button" onClick={() => runAiReview(reviewTarget.targetScope, null)} disabled={reviewRunning}>선택 매핑 전체 검수</button>
         <button className="btn btn-danger" type="button" onClick={cancelCurrentReview} disabled={!reviewRunning || !reviewJobInfo?.job_id || cancelingReview}> {cancelingReview ? "취소 요청 중" : "검수 취소"} </button>      
       </div>
@@ -1930,6 +2036,71 @@ const targetSubtypeOptions = useMemo(() => {
     );
   };
 
+  const renderReviewPagination = () => {
+    const startNumber =
+      reviewTargetRows.length === 0
+        ? 0
+        : (reviewCurrentPage - 1) * REVIEW_TARGET_PAGE_SIZE + 1;
+
+    const endNumber = Math.min(
+      reviewCurrentPage * REVIEW_TARGET_PAGE_SIZE,
+      reviewTargetRows.length
+    );
+
+    return (
+      <div className="pagination-bar">
+        <div className="pagination-info">
+          전체 {reviewTargetRows.length.toLocaleString()}건 중{" "}
+          {startNumber.toLocaleString()}-{endNumber.toLocaleString()} 표시
+        </div>
+
+        <div className="pagination-actions">
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setReviewCurrentPage(1)}
+            disabled={reviewCurrentPage === 1}
+          >
+            처음
+          </button>
+
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setReviewCurrentPage((prev) => Math.max(1, prev - 1))}
+            disabled={reviewCurrentPage === 1}
+          >
+            이전
+          </button>
+
+          <span className="pagination-current">
+            {reviewCurrentPage.toLocaleString()} / {reviewTargetTotalPages.toLocaleString()}
+          </span>
+
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() =>
+              setReviewCurrentPage((prev) => Math.min(reviewTargetTotalPages, prev + 1))
+            }
+            disabled={reviewCurrentPage === reviewTargetTotalPages}
+          >
+            다음
+          </button>
+
+          <button
+            className="btn btn-light"
+            type="button"
+            onClick={() => setReviewCurrentPage(reviewTargetTotalPages)}
+            disabled={reviewCurrentPage === reviewTargetTotalPages}
+          >
+            마지막
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const renderQuestionTable = ({rowsToShow, title, showCount = false, totalCount = null, emptyText = "조회된 문제가 없습니다.",}) => {
     const allVisibleChecked = rowsToShow.length > 0 && rowsToShow.every((row) => selectedRows.includes(row.rowKey));
 
@@ -1943,11 +2114,21 @@ const targetSubtypeOptions = useMemo(() => {
             ) : null}
           </div>
           <div className="table-actions">
-            <button className="btn btn-light" type="button" onClick={() => handleBulkAction("정상 처리")}>선택 정상처리</button>
-            <button className="btn btn-warning" type="button" onClick={() => handleBulkAction("보류")}>선택 보류</button>
-            <button className="btn btn-danger" type="button" onClick={() => handleBulkAction("제외")}>선택 제외</button>
-            <button className="btn btn-danger" type="button" onClick={() => handleBulkAction("삭제")}>선택 삭제</button>
-            <button className="btn btn-success" type="button" onClick={() => handleBulkAction("검수완료 최종반영")}>검수완료 최종반영</button>
+            <button
+              className="btn btn-light"
+              type="button"
+              onClick={() => handleBulkAction("정상")}
+            >
+              선택 정상처리
+            </button>
+
+            <button
+              className="btn btn-warning"
+              type="button"
+              onClick={() => handleBulkAction("보류")}
+            >
+              선택 보류
+            </button>
           </div>
         </div>
 
@@ -1967,7 +2148,7 @@ const targetSubtypeOptions = useMemo(() => {
                 <th>문제</th>
                 <th className="review-status-col">검수상태</th>
                 <th>오류유형</th>
-                <th>기타사유</th>
+                <th>오류사유</th>
                 <th className="reviewer-col">검수자</th>
                 <th>검수일</th>
                 <th>반영상태</th>
@@ -2097,12 +2278,13 @@ const targetSubtypeOptions = useMemo(() => {
         <>
           {renderTargetForm()}
           {renderQuestionTable({
-            rowsToShow: reviewTargetRows,
+            rowsToShow: reviewTargetPageRows,
             title: "검수 대상 문제 내역 ",
             showCount: true,
             totalCount: reviewTargetRows.length,
             emptyText: "표시할 문제가 없습니다. 매핑 DB와 문제 DB의 시험 고유 번호를 확인해 주세요.",
           })}
+          {renderReviewPagination()}
         </>
       ) : pageMode === "list" ? (
         <>
@@ -2135,37 +2317,19 @@ const targetSubtypeOptions = useMemo(() => {
                 <button type="button" className="modal-btn red" onClick={closeReviewModal}>닫기</button>
               </div>
             </div>
+
             <div className="review-modal-body">
               <section className="review-panel original-panel">
                 <div className="panel-title">검수 문제</div>
-                <div className="info-grid">
-                  <div><span>시험 고유 번호</span><strong>{editForm.exam_unique_no || "-"}</strong></div>
-                  <div><span>CD값</span><strong>{editForm.cd_value || "-"}</strong></div>
-                  <div><span>번호</span><strong>{editForm.question_no || "-"}</strong></div>
-                  <div><span>검수상태</span><strong>{editForm.status || "-"}</strong></div>
-                </div>
-                <h3>문제</h3><div className="readonly-box">{editForm.question || "문제 없음"}</div>
-                <h3>보기</h3><div className={`readonly-box ${editForm.view_text ? "has-value" : "muted"}`}> {editForm.view_text || "보기 없음"}</div>
-                <h3>보기 이미지</h3><div className={`readonly-box ${editForm.image_url ? "has-value" : "muted"}`}> {editForm.image_url || "보기 이미지 없음"}</div>
-                <h3>정답</h3>
-                <div className={`readonly-box ${editForm.answer && editForm.answer !== "-" ? "has-value" : "muted"}`}>
-                  {editForm.answer || "-"}
-                </div>
 
-                <h3>키워드</h3>
-                <div className={`readonly-box ${editForm.keywords && editForm.keywords !== "-" ? "has-value" : "muted"}`}>
-                  {editForm.keywords || "-"}
-                </div>
-                <h3>선지</h3><div className="choice-list">{[editForm.choice1, editForm.choice2, editForm.choice3, editForm.choice4].filter(Boolean).map((choice, index) => (<div className="choice-item" key={`${choice}-${index}`}><span>{index + 1}</span><p>{choice}</p></div>))}
-                </div>
-                <h3>검수 사유</h3><div className="readonly-box">{editForm.reason || editForm.memo || "-"}</div>
-              </section>
-              <section className="review-panel edit-panel">
-                <div className="panel-title">수정</div>
+                <div className="original-summary-grid">
+                  <div>
+                    <span>번호</span>
+                    <strong>{editForm.question_no || "-"}</strong>
+                  </div>
 
-                <div className="edit-grid answer-keyword-grid">
-                  <label className="answer-field">
-                    정답
+                  <label>
+                    <span>정답</span>
                     <input
                       name="answer"
                       value={editForm.answer || ""}
@@ -2173,47 +2337,175 @@ const targetSubtypeOptions = useMemo(() => {
                     />
                   </label>
 
-                  <label className="keyword-field">
-                    키워드
+                  <label>
+                    <span>키워드</span>
                     <input
                       name="keywords"
                       value={editForm.keywords || ""}
                       onChange={handleEditChange}
                     />
                   </label>
+
+                  <div>
+                    <span>검수 상태</span>
+                    <strong>{editForm.status || "-"}</strong>
+                  </div>
                 </div>
 
-                <label className="full-field">문제<textarea name="question" value={editForm.question} onChange={handleEditChange} /></label>
-                <label className="full-field">보기<textarea name="view_text" value={editForm.view_text} onChange={handleEditChange} /></label>
-                <label className="full-field"> 보기 이미지 URL <input className="single-line-input" name="image_url" value={editForm.image_url} onChange={handleEditChange} /> </label>
-                <div className="choice-edit-group">
-                  <label className="full-field">선지1<textarea name="choice1" value={editForm.choice1} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지1 이미지 URL<input className="single-line-input" name="choice1_image_url" value={editForm.choice1_image_url} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지2<textarea name="choice2" value={editForm.choice2} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지2 이미지 URL<input className="single-line-input" name="choice2_image_url" value={editForm.choice2_image_url} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지3<textarea name="choice3" value={editForm.choice3} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지3 이미지 URL<input className="single-line-input" name="choice3_image_url" value={editForm.choice3_image_url} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지4<textarea name="choice4" value={editForm.choice4} onChange={handleEditChange} /></label>
-                  <label className="full-field">선지4 이미지 URL<input className="single-line-input"   name="choice4_image_url" value={editForm.choice4_image_url} onChange={handleEditChange} /></label>
+                <label className="full-field">
+                  문제
+                  <textarea
+                    name="question"
+                    value={editForm.question || ""}
+                    onChange={handleEditChange}
+                    placeholder="문제를 입력하세요."
+                  />
+                </label>
+
+                <label className="full-field">
+                  보기
+                  <textarea
+                    name="view_text"
+                    value={editForm.view_text || ""}
+                    onChange={handleEditChange}
+                    placeholder="보기를 입력하세요."
+                  />
+                </label>
+
+                <label className="full-field">
+                  보기 이미지 URL
+                  <input
+                    name="image_url"
+                    value={editForm.image_url || ""}
+                    onChange={handleEditChange}
+                    placeholder="보기 이미지 URL을 입력하세요."
+                  />
+                </label>
+
+                <div className="choice-edit-list">
+                  {[1, 2, 3, 4].map((num) => (
+                    <div className="choice-edit-block" key={`choice-edit-${num}`}>
+                      <label className="full-field">
+                        선지{num}
+                        <textarea
+                          name={`choice${num}`}
+                          value={editForm[`choice${num}`] || ""}
+                          onChange={handleEditChange}
+                          placeholder={`선지${num} 내용을 입력하세요.`}
+                        />
+                      </label>
+
+                      <label className="full-field choice-image-field">
+                        선지{num} 이미지
+                        <input
+                          name={`choice${num}_image_url`}
+                          value={editForm[`choice${num}_image_url`] || ""}
+                          onChange={handleEditChange}
+                          placeholder={`선지${num} 이미지 URL을 입력하세요.`}
+                        />
+                      </label>
+                    </div>
+                  ))}
                 </div>
               </section>
-              <aside className="review-panel side-panel">
+
+              <aside className="review-panel side-panel review-content-panel">
                 <div className="panel-title">검수 내용</div>
-                <label className="full-field">검수 상태<select name="status" value={editForm.status} onChange={handleEditChange}><option value="완료">완료</option><option value="정상">정상</option><option value="오류있음">오류있음</option><option value="보류">보류</option><option value="검수중">검수중</option></select></label>
-                <h3>오류 유형 다중 선택</h3>
-                <div className="error-type-columns">
-                  <div className="error-type-box"><h4>내용 오류</h4><div className="error-check-list">{CONTENT_ERROR_TYPES.map((type) => <label key={type} className="error-check-item"><input type="checkbox" checked={editForm.error_types.includes(type)} onChange={() => toggleErrorType(type)} /><span>{type}</span></label>)}</div></div>
-                  <div className="error-type-box"><h4>형식 오류</h4><div className="error-check-list">{FORMAT_ERROR_TYPES.map((type) => <label key={type} className="error-check-item"><input type="checkbox" checked={editForm.error_types.includes(type)} onChange={() => toggleErrorType(type)} /><span>{type}</span></label>)}</div></div>
+
+                <div className="review-content-top">
+                  <label className="full-field review-status-field">
+                    검수 상태
+                    <select name="status" value={editForm.status} onChange={handleEditChange}>
+                      <option value="완료">완료</option>
+                      <option value="정상">정상</option>
+                      <option value="오류있음">오류있음</option>
+                      <option value="보류">보류</option>
+                      <option value="검수중">검수중</option>
+                    </select>
+                  </label>
+
+                  <div className="side-actions top-actions">
+                    <button type="button" className="save-green" onClick={() => saveReview("정상")}>
+                      정상 처리 후 닫기
+                    </button>
+
+                    <button type="button" className="save-dark" onClick={() => saveReview(editForm.status)}>
+                      저장 후 닫기
+                    </button>
+
+                    <button type="button" className="save-yellow" onClick={() => saveReview("보류")}>
+                      보류 처리
+                    </button>
+                  </div>
                 </div>
-                <label className="full-field">기타 사유 / 검수 메모<textarea name="memo" value={editForm.memo} onChange={handleEditChange} placeholder="기타를 선택했거나 추가 설명이 필요하면 입력하세요." /></label>
-                <div className="side-actions">
-                  <button type="button" className="save-green" onClick={() => saveReview("정상")}>정상 처리 후 닫기</button>
-                  <button type="button" className="save-dark" onClick={() => saveReview(editForm.status)}>저장 후 닫기</button>
-                  <button type="button" className="save-yellow" onClick={() => saveReview("보류")}>보류 처리</button>
-                  <button type="button" className="save-red" onClick={closeReviewModal}>닫기</button>
+
+                <div className="review-content-grid">
+                  <div className="review-error-column">
+                    <div className="review-content-block error-block content-error-block">
+                      <h3>내용 오류</h3>
+                      <div className="error-type-box">
+                        <div className="error-check-list">
+                          {CONTENT_ERROR_TYPES.map((type) => (
+                            <label key={type} className="error-check-item">
+                              <input
+                                type="checkbox"
+                                checked={editForm.error_types.includes(type)}
+                                onChange={() => toggleErrorType(type)}
+                              />
+                              <span>{type}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="review-content-block error-block format-error-block">
+                      <h3>형식 오류</h3>
+                      <div className="error-type-box">
+                        <div className="error-check-list">
+                          {FORMAT_ERROR_TYPES.map((type) => (
+                            <label key={type} className="error-check-item">
+                              <input
+                                type="checkbox"
+                                checked={editForm.error_types.includes(type)}
+                                onChange={() => toggleErrorType(type)}
+                              />
+                              <span>{type}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="review-text-column">
+                    <label className="full-field review-content-block reason-block">
+                      Reason / 오류 사유
+                      <textarea
+                        name="reason"
+                        value={editForm.reason || ""}
+                        onChange={handleEditChange}
+                        placeholder="오류 사유를 입력하세요."
+                      />
+                    </label>
+
+                    <label className="full-field review-content-block suggestion-block">
+                      Suggestion / 수정 제안
+                      <textarea
+                        name="suggestion"
+                        value={editForm.suggestion || ""}
+                        onChange={handleEditChange}
+                        placeholder="수정 제안을 입력하세요."
+                      />
+                    </label>
+                  </div>
                 </div>
+
+
               </aside>
             </div>
+
+
           </div>
         </div>
       )}
@@ -2222,3 +2514,8 @@ const targetSubtypeOptions = useMemo(() => {
 }
 
 export default App;
+createRoot(document.getElementById("root")).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
+);

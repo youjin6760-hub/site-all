@@ -1,7 +1,5 @@
 import json
 import os
-import uuid
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,37 +8,20 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from collect_api import collect_from_target
-from claude_api import ERROR_CODES, review_raw_files
-from site_api.main import app as question_api_app
+from chatgpt_api import ERROR_CODES, review_job_dir
+from db_api import app as question_api_app
 
 APP_ROOT = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent)).resolve()
 JOBS_DIR = Path(os.getenv("JOBS_DIR", APP_ROOT / "jobs")).resolve()
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
-RAW_DIR = APP_ROOT / "raw"
-REVIEWED_DIR = APP_ROOT / "reviewed_json"
-IMG_DIR = APP_ROOT / "images"
-DEBUG_DIR = APP_ROOT / "debug"
 
-ISSUE_XLSX_PATH = APP_ROOT / "claude.xlsx"
-FORMULA_XLSX_PATH = APP_ROOT / "exclaude.xlsx"
-
-
-def clear_folder(folder: Path) -> None:
-    folder.mkdir(parents=True, exist_ok=True)
-
-    for item in folder.iterdir():
-        if item.is_dir():
-            shutil.rmtree(item)
-        else:
-            item.unlink()
             
 app = FastAPI(
     title="Question Review API",
     version="1.0.0",
-    description="사이트에서 전달한 target JSON 기준으로 문제 수집과 Claude 검수를 실행합니다.",
+    description="사이트에서 전달한 target JSON 기준으로 문제 수집과 ChatGPT 검수를 실행합니다.",
 )
 
-# 같은 도메인에서만 호출한다면 CORS 설정은 더 좁게 제한해도 됩니다.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -64,8 +45,36 @@ def now_iso() -> str:
 
 
 def new_job_id() -> str:
-    return "review_" + datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+    now = datetime.now()
 
+    prefix = f"{now.strftime('%y')}_{now.month}_{now.day}_"
+
+    max_count = 0
+
+    if JOBS_DIR.exists():
+        for item in JOBS_DIR.iterdir():
+            if not item.is_dir():
+                continue
+
+            name = item.name
+
+            if not name.startswith(prefix):
+                continue
+
+            suffix = name[len(prefix):]
+
+            if suffix.isdigit():
+                max_count = max(max_count, int(suffix))
+
+    next_count = max_count + 1
+
+    while True:
+        job_id = f"{prefix}{next_count}"
+
+        if not (JOBS_DIR / job_id).exists():
+            return job_id
+
+        next_count += 1
 
 def job_dir(job_id: str) -> Path:
     if not job_id or "/" in job_id or "\\" in job_id or ".." in job_id:
@@ -137,45 +146,77 @@ def normalize_question_no(value: Any) -> str:
     except Exception:
         return text_value
    
+def make_site_meta_key(
+    set_name: Any,
+    subject_name: Any,
+    subtype_name: Any,
+    question_no: Any,
+) -> str:
+    return "||".join([
+        str(set_name or "").strip(),
+        str(subject_name or "").strip(),
+        str(subtype_name or "").strip(),
+        normalize_question_no(question_no),
+    ])
 
 def get_question_site_meta_map(target: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """
-    사이트 DB 문제와 collect 결과를 연결하기 위한 매핑입니다.
-    기본 매칭키는 question_no입니다.
-
-    주의:
-    한 job 안에는 같은 exam_unique_no에 속한 문제만 넣는 것을 권장합니다.
-    서로 다른 exam_unique_no의 같은 question_no가 섞이면 question_no만으로 구분이 어렵습니다.
-    """
     mapping: dict[str, dict[str, Any]] = {}
-    questions = target.get("questions") or []
 
-    if not isinstance(questions, list):
-        return mapping
+    def add_source(source: dict[str, Any]) -> None:
+        questions = source.get("questions") or []
 
-    default_exam_unique_no = target.get("exam_unique_no")
+        if not isinstance(questions, list):
+            return
 
-    for q in questions:
-        if not isinstance(q, dict):
-            continue
+        default_exam_unique_no = source.get("exam_unique_no")
+        set_name = source.get("set_name", "")
+        subject_name = source.get("subject_name", "")
+        subtype_name = source.get("subtype_name") or source.get("sub_title") or ""
 
-        qno = q.get("question_no") or q.get("no")
-        qno_key = normalize_question_no(qno)
+        for q in questions:
+            if not isinstance(q, dict):
+                continue
 
-        if not qno_key:
-            continue
+            qno = q.get("question_no") or q.get("no")
+            qno_key = normalize_question_no(qno)
 
-        site_id = q.get("site_question_id") or q.get("site_problem_id") or q.get("idx") or q.get("id")
-        exam_unique_no = q.get("exam_unique_no") or default_exam_unique_no
+            if not qno_key:
+                continue
 
-        mapping[qno_key] = {
-            "site_question_id": site_id,
-            "exam_unique_no": exam_unique_no,
-            "source_question": q,
-        }
+            site_id = (
+                q.get("site_question_id")
+                or q.get("site_problem_id")
+                or q.get("idx")
+                or q.get("id")
+            )
+
+            exam_unique_no = q.get("exam_unique_no") or default_exam_unique_no
+
+            meta = {
+                "site_question_id": site_id,
+                "exam_unique_no": exam_unique_no,
+                "source_question": q,
+            }
+
+            composite_key = make_site_meta_key(
+                set_name,
+                subject_name,
+                subtype_name,
+                qno,
+            )
+
+            mapping[composite_key] = meta
+
+            # 기존 단일 target 방식 호환용 fallback
+            mapping.setdefault(qno_key, meta)
+
+    add_source(target)
+
+    for child in target.get("targets") or target.get("configs") or []:
+        if isinstance(child, dict):
+            add_source(child)
 
     return mapping
-
 
 def normalize_issues(reviewed: dict[str, Any]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
@@ -234,7 +275,14 @@ def build_site_result(job_id: str, target: dict[str, Any], reviewed_questions: l
 
         qno = reviewed.get("question_no")
         qno_key = normalize_question_no(qno)
-        site_meta = site_meta_map.get(qno_key, {})
+        site_key = make_site_meta_key(
+            reviewed.get("set_name", ""),
+            reviewed.get("subject_name", ""),
+            reviewed.get("sub_title", ""),
+            qno,
+        )
+
+        site_meta = site_meta_map.get(site_key) or site_meta_map.get(qno_key, {})
         issues = normalize_issues(reviewed)
 
         item = {
@@ -311,21 +359,10 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
 
         update_status(job_path, "collecting")
 
-        # 이전 실행 결과가 섞이지 않도록 루트 결과 폴더를 비웁니다.
-        clear_folder(RAW_DIR)
-        clear_folder(REVIEWED_DIR)
-        clear_folder(IMG_DIR)
-        clear_folder(DEBUG_DIR)
-
-        for xlsx_path in [ISSUE_XLSX_PATH, FORMULA_XLSX_PATH]:
-            if xlsx_path.exists():
-                xlsx_path.unlink()
-
-        # job_dir를 넘기지 않으면 collect_api.py가 기존 루트 raw/debug/images 폴더를 사용합니다.
         collect_from_target(
             target,
-            job_id=None,
-            job_dir=None,
+            job_id=job_id,
+            job_dir=job_path,
             headless=headless,
             cancel_checker=lambda: raise_if_cancelled(job_id),
         )
@@ -334,13 +371,8 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
 
         update_status(job_path, "reviewing")
 
-        raw_files = sorted(RAW_DIR.glob("*.json"))
-
-        reviewed_questions = review_raw_files(
-            raw_files=raw_files,
-            reviewed_dir=REVIEWED_DIR,
-            issue_xlsx_path=ISSUE_XLSX_PATH,
-            formula_xlsx_path=FORMULA_XLSX_PATH,
+        reviewed_questions = review_job_dir(
+            job_path,
             write_excel=bool(options.get("write_excel", True)),
             cancel_checker=lambda: raise_if_cancelled(job_id),
         )
@@ -354,11 +386,7 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
 
         result = build_site_result(job_id, target, reviewed_questions)
 
-        # 프론트 상태 조회용
         write_json(job_path / "result.json", result)
-
-        # 사람이 바로 보기 쉬운 루트 결과 파일
-        write_json(APP_ROOT / "result.json", result)
 
         update_status(
             job_path,
@@ -366,6 +394,7 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
             total_questions=result["summary"]["total_questions"],
             issue_question_count=result["summary"]["issue_question_count"],
         )
+
         return result
 
     except JobCancelled as e:
@@ -379,6 +408,7 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:
         update_status(job_path, "failed", error_message=str(e))
         raise
+    
 @app.get("/health")
 def health():
     return {"ok": True, "time": now_iso()}

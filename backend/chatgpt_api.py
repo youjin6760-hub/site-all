@@ -9,23 +9,24 @@ from pathlib import Path
 import time
 from typing import Any
 
-from anthropic import Anthropic, RateLimitError
+from openai import OpenAI, RateLimitError
 from dotenv import load_dotenv
 from openpyxl import Workbook, load_workbook
 
 
 ROOT = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent)).resolve()
+
 RAW_DIR = Path(os.getenv("RAW_DIR", ROOT / "raw")).resolve()
 
 REVIEWED_DIR = Path(os.getenv("REVIEWED_DIR", ROOT / "reviewed_json")).resolve()
-REVIEWED_DIR.mkdir(parents=True, exist_ok=True)
 
 # ISSUE_XLSX_PATH = ROOT / "json_issue_index.xlsx"
-ISSUE_XLSX_PATH = Path(os.getenv("ISSUE_XLSX_PATH", ROOT / "claude.xlsx")).resolve()
-FORMULA_XLSX_PATH = Path(os.getenv("FORMULA_XLSX_PATH", ROOT / "exclaude.xlsx")).resolve()
+ISSUE_XLSX_PATH = Path(os.getenv("ISSUE_XLSX_PATH", ROOT / "chatgpt.xlsx")).resolve()
+FORMULA_XLSX_PATH = Path(os.getenv("FORMULA_XLSX_PATH", ROOT / "formula.xlsx")).resolve()
 
-MODEL_NAME = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-MAX_TOKENS = 6000
+MODEL_NAME = os.getenv("CHATGPT_MODEL", "gpt-5.4")
+MAX_TOKENS = int(os.getenv("CHATGPT_MAX_OUTPUT_TOKENS", "6000"))
+CHATGPT_REASONING_EFFORT = os.getenv("CHATGPT_REASONING_EFFORT", "medium")
 
 MAX_QUESTION_IMAGES = 2
 MAX_CHOICE_IMAGES = 4
@@ -51,7 +52,7 @@ def guess_media_type(path: Path) -> str:
 
 def make_text_block(text: str) -> dict:
     return {
-        "type": "text",
+        "type": "input_text",
         "text": text
     }
 
@@ -70,15 +71,11 @@ def make_image_block(path_str: str, label: str) -> list[dict]:
     return [
         make_text_block(f"[첨부 이미지] {label}: {path.name}"),
         {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": media_type,
-                "data": encoded
-            }
+            "type": "input_image",
+            "image_url": f"data:{media_type};base64,{encoded}"
         }
     ]
-
+    
 def safe_sheet_name(name: str) -> str:
     if not name:
         return "issues"
@@ -471,10 +468,11 @@ def parse_review_response(text: str, question_id: str, mode: str) -> dict:
         return extract_json_from_text(text)
 
     except Exception as e:
-        DEBUG_DIR = ROOT / "debug_api_response"
-        DEBUG_DIR.mkdir(exist_ok=True)
+        DEBUG_DIR = REVIEWED_DIR.parent / "debug_api_response"
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
         debug_path = DEBUG_DIR / f"{question_id}_{mode}_parse_fail.txt"
+
         with open(debug_path, "w", encoding="utf-8") as f:
             f.write(text)
 
@@ -864,16 +862,18 @@ def review_one(client, prompt: str, question_data: dict, mode: str) -> dict:
 
     for attempt in range(5):
         try:
-            resp = client.messages.create(
+            resp = client.responses.create(
                 model=MODEL_NAME,
-                max_tokens=MAX_TOKENS,
-                temperature=0,
-                messages=[
+                input=[
                     {
                         "role": "user",
-                        "content": content
+                        "content": content,
                     }
-                ]
+                ],
+                max_output_tokens=MAX_TOKENS,
+                reasoning={
+                    "effort": CHATGPT_REASONING_EFFORT
+                }
             )
             break
 
@@ -889,14 +889,10 @@ def review_one(client, prompt: str, question_data: dict, mode: str) -> dict:
     else:
         raise RuntimeError("RateLimit 재시도 실패")
 
-    text = ""
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            text += block.text
-
+    text = getattr(resp, "output_text", "") or ""
     text = text.strip()
-    return parse_review_response(text, question_data.get("question_id", ""), mode)
 
+    return parse_review_response(text, question_data.get("question_id", ""), mode)
 
 def question_no_from_filename(path: Path):
     try:
@@ -939,7 +935,7 @@ def review_raw_files(
     cancel_checker=None,
 ) -> list[dict[str, Any]]:
     """
-    전달받은 raw JSON 파일 목록만 Claude로 검수합니다.
+    전달받은 raw JSON 파일 목록만 chatgpt로 검수합니다.
     기존 TARGET_PREFIXES 방식 대신, 방금 수집한 job 폴더의 raw 파일만 넘기는 API용 함수입니다.
     """
     configure_review_dirs(
@@ -951,11 +947,11 @@ def review_raw_files(
 
     load_dotenv(ROOT / ".env")
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = os.getenv("CHATGPT_API_KEY")
     if not api_key:
-        raise RuntimeError("환경변수 ANTHROPIC_API_KEY가 필요합니다.")
+        raise RuntimeError("환경변수 CHATGPT_API_KEY가 필요합니다.")
 
-    client = Anthropic(
+    client = OpenAI(
         api_key=api_key,
         timeout=120
     )
@@ -1093,16 +1089,16 @@ def review_job_dir(
     configure_review_dirs(
         raw_dir=raw_dir,
         reviewed_dir=reviewed_dir,
-        issue_xlsx_path=job_dir / "claude.xlsx",
-        formula_xlsx_path=job_dir / "exclaude.xlsx",
+        issue_xlsx_path=job_dir / "chatgpt.xlsx",
+        formula_xlsx_path=job_dir / "formula.xlsx",
     )
 
     raw_files = sorted(raw_dir.glob("*.json"), key=question_no_from_filename)
     return review_raw_files(
         raw_files=raw_files,
         reviewed_dir=reviewed_dir,
-        issue_xlsx_path=job_dir / "claude.xlsx",
-        formula_xlsx_path=job_dir / "exclaude.xlsx",
+        issue_xlsx_path=job_dir / "chatgpt.xlsx",
+        formula_xlsx_path=job_dir / "formula.xlsx",
         write_excel=write_excel,
         cancel_checker=cancel_checker,
     )

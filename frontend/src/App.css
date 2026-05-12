@@ -1,3 +1,96 @@
+:root {
+  --bg: #edf1f7;
+  --card: #ffffff;
+  --text: #172033;
+  --text-soft: #475467;
+  --muted: #6b7280;
+  --line: #dfe5f0;
+
+  --navy: #07162f;
+  --blue: #2d5bff;
+  --blue-dark: #2449d8;
+
+  --danger: #ef4444;
+  --danger-bg: #fff3f3;
+  --danger-border: #f6b4b4;
+
+  --success: #16a34a;
+  --success-bg: #ecfdf3;
+  --success-border: #c7f0d4;
+
+  --gray-bg: #f3f4f6;
+  --gray-border: #e5e7eb;
+
+  --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+
+  --sans: system-ui, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+  --mono: ui-monospace, Consolas, monospace;
+
+  --review-original-width: 0.95fr;
+  --review-content-width: 1.25fr;
+
+  --summary-no-width: 72px;
+  --summary-answer-width: 90px;
+  --summary-status-width: 110px;
+
+  --review-status-width: 220px;
+  --review-action-button-width: 160px;
+
+  --problem-textarea-height: 96px;
+  --view-textarea-height: 76px;
+  --choice-textarea-height: 58px;
+
+  --review-reason-height: 210px;
+  --review-suggestion-height: 210px;
+
+  --review-error-column-width: 0.95fr;
+  --review-text-column-width: 1.05fr;
+
+  font-family: var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, rgba(45, 91, 255, 0.12), transparent 28%),
+    linear-gradient(180deg, #f4f7fb 0%, #edf1f7 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+textarea {
+  font-family: inherit;
+}
+
+button {
+  border: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+
 .page {
   width: 100%;
   min-height: 100vh;
@@ -238,13 +331,16 @@
 
 .table-wrap {
   width: 100%;
-  /* overflow-x: auto; */
+  overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid #e5e7eb;
   border-radius: 6px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .review-table {
   width: 100%;
+  min-width: 1280px;
   border-collapse: collapse;
   table-layout: auto;
   background: #ffffff;
@@ -635,14 +731,6 @@
   background: #dc2626;
 }
 
-.review-modal-body {
-  height: calc(100% - 62px);
-  padding: 16px;
-  display: grid;
-  grid-template-columns: 1.25fr 0.95fr 0.42fr;
-  gap: 14px;
-}
-
 .review-panel {
   background: #ffffff;
   border: 1px solid #dbe4f0;
@@ -651,41 +739,9 @@
   overflow-y: auto;
 }
 
-.edit-panel {
-  border-color: #bfdbfe;
-}
 
 .side-panel {
   border-color: #ddd6fe;
-}
-
-.info-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.info-grid div {
-  min-height: 62px;
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #f9fafb;
-}
-
-.info-grid span {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 12px;
-  font-weight: 800;
-  color: #6b7280;
-}
-
-.info-grid strong {
-  font-size: 14px;
-  font-weight: 900;
-  color: #111827;
 }
 
 .review-panel h3 {
@@ -715,43 +771,6 @@
   color: #9ca3af;
 }
 
-.choice-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.choice-item {
-  display: grid;
-  grid-template-columns: 42px 1fr;
-  min-height: 46px;
-  border: 1px solid #e5e7eb;
-  border-radius: 7px;
-  overflow: hidden;
-  background: #ffffff;
-}
-
-.choice-item span {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f3f4f6;
-  font-weight: 900;
-}
-
-.choice-item p {
-  margin: 0;
-  padding: 13px 14px;
-  line-height: 1.5;
-}
-
-.edit-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
-}
-
-.edit-grid label,
 .full-field {
   display: flex;
   flex-direction: column;
@@ -762,7 +781,6 @@
   color: #374151;
 }
 
-.edit-grid input,
 .full-field input,
 .full-field select,
 .full-field textarea {
@@ -776,13 +794,6 @@
   outline: none;
 }
 
-.full-field textarea {
-  min-height: 86px;
-  resize: vertical;
-  line-height: 1.5;
-}
-
-.edit-grid input:focus,
 .full-field input:focus,
 .full-field select:focus,
 .full-field textarea:focus {
@@ -797,31 +808,11 @@
   margin-bottom: 3px;
 }
 
-.error-check-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 7px;
-  background: #ffffff;
-  font-size: 14px;
-  font-weight: 800;
-  color: #374151;
-  cursor: pointer;
-}
-
 .error-check-item input {
   margin-top: 2px;
 }
 .error-type-columns + .full-field {
   margin-top: 18px;
-}
-
-.side-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
 }
 
 .side-actions button {
@@ -849,20 +840,6 @@
   background: #dc2626;
 }
 
-
-.choice-edit-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.choice-edit-group .full-field {
-  margin-bottom: 4px;
-}
-
-.choice-edit-group textarea {
-  min-height: 72px;
-}
 
 .error-type-columns {
   display: flex;
@@ -1346,45 +1323,6 @@
   }
 }
 
-
-.single-line-input {
-  min-height: 38px;
-  height: 38px;
-  resize: none;
-}
-
-.edit-grid .answer-field {
-  max-width: 120px;
-}
-
-.edit-grid .answer-field input {
-  width: 100%;
-  min-width: 80px;
-  height: 38px;
-}
-
-
-.answer-keyword-grid {
-  grid-template-columns: 90px minmax(0, 1fr);
-  gap: 12px;
-  align-items: end;
-}
-
-.answer-keyword-grid .answer-field {
-  width: 90px;
-  max-width: 90px;
-}
-
-.answer-keyword-grid .answer-field input {
-  width: 100%;
-  height: 38px;
-}
-
-.answer-keyword-grid .keyword-field input {
-  width: 100%;
-  height: 38px;
-}
-
 .review-table th.cd-col,
 .review-table td.cd-col {
   width: 70px;
@@ -1477,4 +1415,480 @@
   font-size: 18px;
   font-weight: 900;
   color: #111827;
+}
+
+.side-actions button {
+  min-height: 42px;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+/* =========================
+   Review modal final override
+   아래 변수만 바꾸면 칸 길이 조정 가능
+========================= */
+
+/* 모달 전체 2칸 구조 */
+.review-modal-body {
+  height: calc(100% - 62px);
+  padding: 16px;
+  display: grid;
+  grid-template-columns: var(--review-original-width) var(--review-content-width);
+  gap: 14px;
+}
+
+/* 검수 문제 상단: 번호 / 정답 / 키워드 / 검수 상태 */
+.original-summary-grid {
+  display: grid;
+  grid-template-columns:
+    var(--summary-no-width)
+    var(--summary-answer-width)
+    minmax(220px, 1fr)
+    var(--summary-status-width);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.original-summary-grid > div,
+.original-summary-grid > label {
+  min-height: 62px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f9fafb;
+}
+
+.original-summary-grid span {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 12px;
+  font-weight: 800;
+  color: #6b7280;
+}
+
+.original-summary-grid strong {
+  font-size: 14px;
+  font-weight: 900;
+  color: #111827;
+  line-height: 1.35;
+}
+
+.original-summary-grid input {
+  width: 100%;
+  height: 30px;
+  padding: 5px 8px;
+  border: 1px solid #dfe3ea;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #111827;
+  font-size: 14px;
+  outline: none;
+}
+
+/* 검수 문제 패널 안 직접 수정 영역 */
+.original-panel .full-field textarea[name="question"] {
+  min-height: var(--problem-textarea-height);
+}
+
+.original-panel .full-field textarea[name="view_text"] {
+  min-height: var(--view-textarea-height);
+}
+
+.choice-edit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.choice-edit-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed #e5e7eb;
+}
+
+.choice-edit-block:last-child {
+  border-bottom: none;
+}
+
+.choice-edit-block textarea {
+  min-height: var(--choice-textarea-height);
+}
+
+.choice-image-field {
+  margin-bottom: 0;
+}
+
+/* 오른쪽 검수 내용 패널 */
+.review-content-panel {
+  border-color: #ddd6fe;
+  overflow-y: auto;
+}
+
+/* 검수 상태 옆에 버튼 3개 배치 */
+.review-content-top {
+  display: grid;
+  grid-template-columns: var(--review-status-width) max-content;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.review-status-field {
+  margin-bottom: 0;
+}
+
+.side-actions,
+.top-actions {
+  display: grid;
+  grid-template-columns: repeat(3, var(--review-action-button-width));
+  gap: 10px;
+  justify-content: start;
+  width: auto;
+  margin-top: 0;
+}
+
+.side-actions button,
+.top-actions button {
+  min-height: 42px;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* 내용 오류 / 형식 오류 + Reason / Suggestion 2컬럼 배치 */
+.review-content-panel {
+  display: flex;
+  flex-direction: column;
+  border-color: #ddd6fe;
+  overflow-y: auto;
+}
+
+.review-content-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns:
+    minmax(280px, var(--review-error-column-width))
+    minmax(360px, var(--review-text-column-width));
+  column-gap: 12px;
+  align-items: stretch;
+}
+
+.review-error-column,
+.review-text-column {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 왼쪽 오류 영역 */
+.review-content-block {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.review-content-block h3 {
+  margin: 0 0 8px;
+}
+
+.error-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.content-error-block {
+  flex: 1.3;
+}
+
+.format-error-block {
+  flex: 0.7;
+}
+
+.error-block .error-type-box {
+  flex: 1;
+  min-height: 0 !important;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.error-block .error-check-list {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 각 오류 항목 박스 복구 */
+.error-block .error-check-item {
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+/* 내용 오류는 항목이 많으므로 칸 안에서 널널하게 채움 */
+.content-error-block .error-check-list {
+  justify-content: space-between;
+}
+
+/* 형식 오류는 불필요하게 벌어지지 않게 위쪽 정렬 */
+.format-error-block .error-check-list {
+  justify-content: flex-start;
+}
+
+/* 오른쪽 Reason / Suggestion 영역 */
+.review-text-column {
+  gap: 12px;
+}
+
+.reason-block,
+.suggestion-block {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.reason-block textarea,
+.suggestion-block textarea {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+/* =========================
+   Mobile layout
+========================= */
+@media (max-width: 768px) {
+  .page {
+    width: 100%;
+    min-width: 0;
+    padding: 12px;
+  }
+
+  .page-header {
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  .page-header h1 {
+    font-size: 22px;
+  }
+
+  .header-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .header-actions .btn {
+    width: 100%;
+    min-height: 42px;
+    padding: 0 10px;
+    font-size: 13px;
+  }
+
+  .filter-card,
+  .table-card {
+    width: 100%;
+    padding: 14px;
+    border-radius: 10px;
+  }
+
+  .filter-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .field-wide {
+    grid-column: auto;
+  }
+
+  .field input,
+  .field select {
+    height: 42px;
+    font-size: 14px;
+  }
+
+  .filter-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .filter-actions .btn {
+    width: 100%;
+    min-height: 42px;
+    font-size: 13px;
+  }
+
+  .review-status-line {
+    display: block;
+    line-height: 1.6;
+  }
+
+  .table-top {
+    gap: 10px;
+  }
+
+  .table-title {
+    font-size: 15px;
+    line-height: 1.4;
+  }
+
+  .table-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .table-actions .btn {
+    width: 100%;
+    min-height: 40px;
+    padding: 0 10px;
+    font-size: 13px;
+  }
+
+  .table-wrap {
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .review-table {
+    min-width: 1280px;
+  }
+
+  .review-table th,
+  .review-table td {
+    padding: 10px 8px;
+    font-size: 12px;
+  }
+
+  .pagination-bar {
+    padding: 12px;
+  }
+
+  .pagination-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .pagination-actions .btn,
+  .pagination-current {
+    width: 100%;
+    min-width: 0;
+    height: 38px;
+    padding: 0 8px;
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 768px) {
+  .review-modal-backdrop {
+    padding: 0;
+    align-items: stretch;
+    justify-content: stretch;
+  }
+
+  .review-modal {
+    width: 100vw;
+    height: 100dvh;
+    border-radius: 0;
+  }
+
+  .review-modal-header {
+    height: auto;
+    min-height: 58px;
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  .review-modal-title {
+    font-size: 16px;
+  }
+
+  .review-modal-path {
+    font-size: 11px;
+    line-height: 1.4;
+  }
+
+  .review-modal-body {
+    height: calc(100dvh - 58px);
+    grid-template-columns: 1fr;
+    padding: 10px;
+    gap: 10px;
+    overflow-y: auto;
+  }
+
+  .review-panel {
+    overflow-y: visible;
+    padding: 12px;
+  }
+
+  .original-summary-grid {
+    grid-template-columns: 64px 80px minmax(0, 1fr) 96px;
+    gap: 6px;
+  }
+
+  .original-summary-grid > div,
+  .original-summary-grid > label {
+    min-height: 54px;
+    padding: 8px;
+  }
+
+  .original-summary-grid input {
+    height: 28px;
+    font-size: 13px;
+  }
+
+  .review-content-top {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .side-actions,
+  .top-actions {
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .side-actions button,
+  .top-actions button {
+    width: 100%;
+  }
+
+  .review-content-grid {
+    grid-template-columns: 1fr;
+    row-gap: 12px;
+  }
+
+  .review-content-block textarea[name="reason"],
+  .review-content-block textarea[name="suggestion"] {
+    height: 150px;
+    min-height: 150px;
+  }
 }

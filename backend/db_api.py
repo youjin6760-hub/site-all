@@ -24,9 +24,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 기본값은 로컬 SQLite입니다. 운영 사이트 DB를 쓰려면 .env에 DATABASE_URL을 넣으세요.
-# 예: sqlite:///./review_app.db
-# 예: mysql+pymysql://user:password@host:3306/dbname?charset=utf8mb4
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = BASE_DIR / "review_app.db"
 
@@ -81,6 +78,7 @@ CREATE TABLE IF NOT EXISTS questions (
     review_status TEXT DEFAULT '미검수',
     error_type TEXT,
     reason TEXT,
+    suggestion TEXT,
     reviewer TEXT DEFAULT 'admin',
     reviewed_at TEXT,
     reflect_status TEXT DEFAULT '미반영',
@@ -124,7 +122,7 @@ def init_db() -> None:
         conn.execute(text(CREATE_TARGET_MAPS_SQL))
 
         ensure_column(conn, "questions", "course_name", "course_name TEXT")
-
+        ensure_column(conn, "questions", "suggestion", "suggestion TEXT")
 
 init_db()
 
@@ -207,6 +205,7 @@ def normalize_question_row(row, default_course_name: str = "") -> dict[str, Any]
         "review_status": get_cell(row, ["검수상태", "review_status", "status"], "미검수"),
         "error_type": get_cell(row, ["오류유형", "error_type", "issue_type"], ""),
         "reason": get_cell(row, ["기타사유", "검수사유", "reason", "memo", "review_memo"], ""),
+        "suggestion": get_cell(row, ["수정제안", "수정 제안", "suggestion", "review_suggestion"], ""),
         "reviewer": get_cell(row, ["검수자", "reviewer", "inspector"], "admin"),
         "reviewed_at": get_cell(row, ["검수일", "reviewed_at", "review_date"], ""),
         "reflect_status": get_cell(row, ["반영상태", "reflect_status", "apply_status"], "미반영"),
@@ -324,6 +323,7 @@ def upsert_question(conn, data: dict[str, Any]) -> None:
         "review_status",
         "error_type",
         "reason",
+        "suggestion",
         "reviewer",
         "reviewed_at",
         "reflect_status",
@@ -491,6 +491,7 @@ def update_question(question_id: int, payload: dict):
         "review_status",
         "error_type",
         "reason",
+        "suggestion",
         "reviewer",
         "reflect_status",
     }
