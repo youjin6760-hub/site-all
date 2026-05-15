@@ -9,7 +9,6 @@ import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import IntegrityError
 
 app = FastAPI(title="Question Review Site API", version="2.0.0")
 
@@ -34,7 +33,20 @@ if raw_database_url:
 else:
     DATABASE_URL = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
 
-if DATABASE_URL.startswith("sqlite:///"):
+# Supabase/Heroku 계열에서 postgres:// 로 주는 경우 SQLAlchemy용으로 변환
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
+IS_POSTGRES = DATABASE_URL.startswith("postgresql")
+
+QUESTION_NO_ORDER_SQL = (
+    "CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER ELSE 999999999 END ASC"
+    if IS_POSTGRES
+    else "CAST(question_no AS INTEGER) ASC"
+)
+
+if IS_SQLITE and DATABASE_URL.startswith("sqlite:///"):
     sqlite_path_text = DATABASE_URL.replace("sqlite:///", "", 1)
 
     if sqlite_path_text and sqlite_path_text != ":memory:":
@@ -46,19 +58,33 @@ if DATABASE_URL.startswith("sqlite:///"):
         sqlite_path.parent.mkdir(parents=True, exist_ok=True)
         DATABASE_URL = f"sqlite:///{sqlite_path.as_posix()}"
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+if IS_SQLITE:
+    connect_args = {"check_same_thread": False}
+elif IS_POSTGRES:
+    connect_args = {"sslmode": "require"}
+else:
+    connect_args = {}
+
 engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-CREATE_QUESTIONS_SQL = """
+QUESTION_ID_SQL = "id INTEGER PRIMARY KEY" if IS_SQLITE else "id SERIAL PRIMARY KEY"
+TARGET_MAP_ID_SQL = "id INTEGER PRIMARY KEY AUTOINCREMENT" if IS_SQLITE else "id SERIAL PRIMARY KEY"
+
+CREATE_QUESTIONS_SQL = f"""
 CREATE TABLE IF NOT EXISTS questions (
-    id INTEGER PRIMARY KEY,
+    {QUESTION_ID_SQL},
     course_name TEXT,
+    upload_file TEXT,
     exam_unique_no TEXT,
     cd_value TEXT,
+    subject_name TEXT,
+    chapter TEXT,
+    section TEXT,
+    learning_goal TEXT,
     question_no TEXT,
     question TEXT,
     view_text TEXT,
@@ -82,15 +108,18 @@ CREATE TABLE IF NOT EXISTS questions (
     reviewer TEXT DEFAULT 'admin',
     reviewed_at TEXT,
     reflect_status TEXT DEFAULT '미반영',
+    review_check_labels TEXT,
+    review_scope_summary TEXT,
+    review_check_history TEXT,
     raw_json TEXT,
     created_at TEXT,
     updated_at TEXT
 );
 """
 
-CREATE_TARGET_MAPS_SQL = """
+CREATE_TARGET_MAPS_SQL = f"""
 CREATE TABLE IF NOT EXISTS review_target_maps (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    {TARGET_MAP_ID_SQL},
     display_name TEXT,
     course_name TEXT,
     set_name TEXT,
@@ -105,24 +134,54 @@ CREATE TABLE IF NOT EXISTS review_target_maps (
 );
 """
 
+CREATE_QUESTION_CD_META_MAPS_SQL = f"""
+CREATE TABLE IF NOT EXISTS question_cd_meta_maps (
+    {TARGET_MAP_ID_SQL},
+    cd_value TEXT NOT NULL UNIQUE,
+    subject_name TEXT,
+    chapter TEXT,
+    section TEXT,
+    learning_goal TEXT,
+    raw_json TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+"""
+
 def ensure_column(conn, table_name: str, column_name: str, column_sql: str) -> None:
-    if not DATABASE_URL.startswith("sqlite"):
+    # SQLite는 ADD COLUMN IF NOT EXISTS를 지원하지 않는 버전이 있어 PRAGMA로 확인합니다.
+    if IS_SQLITE:
+        rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
+        existing_columns = {row["name"] for row in rows}
+
+        if column_name not in existing_columns:
+            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}"))
         return
 
-    rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
-    existing_columns = {row["name"] for row in rows}
-
-    if column_name not in existing_columns:
-        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}"))
+    # PostgreSQL/Supabase용입니다.
+    if IS_POSTGRES:
+        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_sql}"))
+        return
         
 
 def init_db() -> None:
     with engine.begin() as conn:
         conn.execute(text(CREATE_QUESTIONS_SQL))
         conn.execute(text(CREATE_TARGET_MAPS_SQL))
+        conn.execute(text(CREATE_QUESTION_CD_META_MAPS_SQL))
 
         ensure_column(conn, "questions", "course_name", "course_name TEXT")
+        ensure_column(conn, "questions", "upload_file", "upload_file TEXT")
+        ensure_column(conn, "questions", "subject_name", "subject_name TEXT")
+        ensure_column(conn, "questions", "chapter", "chapter TEXT")
+        ensure_column(conn, "questions", "section", "section TEXT")
+        ensure_column(conn, "questions", "learning_goal", "learning_goal TEXT")
         ensure_column(conn, "questions", "suggestion", "suggestion TEXT")
+        ensure_column(conn, "questions", "review_check_labels", "review_check_labels TEXT")
+        ensure_column(conn, "questions", "review_scope_summary", "review_scope_summary TEXT")
+        ensure_column(conn, "questions", "review_check_history", "review_check_history TEXT")
+
+        ensure_column(conn, "question_cd_meta_maps", "raw_json", "raw_json TEXT")
 
 init_db()
 
@@ -132,6 +191,43 @@ def clean_value(value: Any, default: str = "") -> str:
         return default
     text_value = str(value).strip()
     return text_value if text_value else default
+
+
+def normalize_cd_value(value: Any) -> str:
+    """
+    엑셀에서 goal_cd/CD값이 2111.0처럼 읽혀도 DB에는 2111로 저장합니다.
+    문제 엑셀의 CD값과 커리큘럼 엑셀의 goal_cd를 같은 문자열로 맞추기 위한 함수입니다.
+    """
+    text_value = clean_value(value, "")
+    if not text_value:
+        return ""
+
+    try:
+        number_value = float(text_value)
+        if number_value.is_integer():
+            return str(int(number_value))
+    except ValueError:
+        pass
+
+    return text_value
+
+
+def get_cd_cell(row, aliases, default=""):
+    return normalize_cd_value(get_cell(row, aliases, default))
+
+
+def cd_value_candidates(value: Any) -> list[str]:
+    base = normalize_cd_value(value)
+    if not base:
+        return []
+
+    candidates = [base]
+
+    # 기존 DB에 2111.0 형태로 저장된 값도 같이 찾아서 업데이트합니다.
+    if base.isdigit():
+        candidates.append(f"{base}.0")
+
+    return list(dict.fromkeys(candidates))
 
 
 def get_cell(row, aliases, default=""):
@@ -175,18 +271,44 @@ def is_target_map_sheet(sheet_name: str, df: pd.DataFrame) -> bool:
     )
 
 
+def is_cd_meta_sheet(sheet_name: str, df: pd.DataFrame) -> bool:
+    name = str(sheet_name).strip().lower().replace(" ", "")
+    if name in {"cd매핑", "cd값매핑", "cd_meta", "cdmetamap", "cdmap", "cd_mapping", "1과목", "2과목"}:
+        return True
+
+    # SQLD 커리큘럼 파일은 goal_cd가 문제 엑셀의 CD값과 매칭되는 키입니다.
+    # 기존 CD 매핑 파일 형식도 같이 받을 수 있게 alias를 넓게 둡니다.
+    return (
+        has_column(df, ["goal_cd", "CD값", "cd_value", "cd", "code"])
+        and (
+            has_column(df, ["s_name", "과목", "과목명", "subject_name", "subject"])
+            or has_column(df, ["c_name", "장", "대단원", "chapter"])
+            or has_column(df, ["section_name", "section", "절", "소단원"])
+            or has_column(df, ["goal", "학습목표", "학습 목표", "learning_goal", "learning goal", "objective"])
+        )
+    )
+
+
 def is_question_sheet(df: pd.DataFrame) -> bool:
     return has_column(df, ["idx", "IDX", "id", "ID"]) and has_column(
         df, ["문제 번호", "문제번호", "question_no", "no", "번호"]
     )
 
-def normalize_question_row(row, default_course_name: str = "") -> dict[str, Any]:
+def normalize_question_row(row, default_course_name: str = "", default_upload_file: str = "") -> dict[str, Any]:
     excel_idx = get_cell(row, ["idx", "IDX", "id", "ID"], "")
     return {
         "id": to_int_or_none(excel_idx),
         "course_name": get_cell(row, ["강좌명", "course_name", "course"], default_course_name),
+        "upload_file": get_cell(row, ["업로드파일", "업로드 파일", "파일명", "upload_file", "file_name", "filename"], default_upload_file),
         "exam_unique_no": get_cell(row, ["시험 고유 번호", "시험고유번호", "exam_unique_no", "exam_no"], ""),
-        "cd_value": get_cell(row, ["CD값", "cd_value", "cd", "code"], ""),        "question_no": get_cell(row, ["문제 번호", "문제번호", "question_no", "번호", "no", "q_no"], ""),
+        "cd_value": get_cd_cell(row, ["CD값", "goal_cd", "cd_value", "cd", "code"], ""),
+        # 과목/장/절/학습목표는 문제 엑셀의 임의 컬럼값을 쓰지 않고,
+        # CD 매핑 엑셀의 goal_cd 기준으로만 채웁니다.
+        "subject_name": "",
+        "chapter": "",
+        "section": "",
+        "learning_goal": "",
+        "question_no": get_cell(row, ["문제 번호", "문제번호", "question_no", "번호", "no", "q_no"], ""),
         "question": get_cell(row, ["문제", "question", "question_text", "content", "stem", "title"], ""),
         "view_text": get_cell(row, ["보기_텍스트", "보기텍스트", "보기", "view_text", "view"], ""),
         "image_url": get_cell(row, ["보기_이미지", "보기이미지", "image_url", "img_url", "image"], ""),
@@ -209,6 +331,32 @@ def normalize_question_row(row, default_course_name: str = "") -> dict[str, Any]
         "reviewer": get_cell(row, ["검수자", "reviewer", "inspector"], "admin"),
         "reviewed_at": get_cell(row, ["검수일", "reviewed_at", "review_date"], ""),
         "reflect_status": get_cell(row, ["반영상태", "reflect_status", "apply_status"], "미반영"),
+        "review_check_labels": get_cell(row, ["검수항목", "review_check_labels", "review_checks"], ""),
+        "review_scope_summary": get_cell(row, ["검수범위", "review_scope_summary", "review_summary"], ""),
+        "review_check_history": get_cell(row, ["검수이력", "review_check_history", "review_history"], ""),
+        "raw_json": json.dumps(row.to_dict(), ensure_ascii=False, default=str),
+        "created_at": now_text(),
+        "updated_at": now_text(),
+    }
+
+
+def normalize_cd_meta_row(row) -> dict[str, Any]:
+    return {
+        # SQLD 커리큘럼 기준: goal_cd가 기존 문제 엑셀의 CD값입니다.
+        "cd_value": get_cd_cell(row, ["goal_cd", "CD값", "cd_value", "cd", "code"], ""),
+
+        # SQLD 커리큘럼 기준 표시값입니다.
+        # subject 컬럼은 "1과목/2과목" 값이라 화면용 과목에는 사용하지 않고, s_name을 우선 사용합니다.
+        "subject_name": get_cell(row, ["s_name", "과목", "과목명", "subject_name", "subject"], ""),
+
+        # chapter는 "1장" 값이고, c_name이 실제 장 이름입니다.
+        "chapter": get_cell(row, ["c_name", "장", "대단원", "chapter_name", "chapter"], ""),
+
+        # s_num은 "1절" 값이고, section_name/section이 실제 절 이름입니다.
+        "section": get_cell(row, ["section_name", "section", "절", "소단원", "section_title", "s_num"], ""),
+
+        # goal이 실제 학습목표입니다.
+        "learning_goal": get_cell(row, ["goal", "학습목표", "학습 목표", "learning_goal", "learning goal", "objective"], ""),
         "raw_json": json.dumps(row.to_dict(), ensure_ascii=False, default=str),
         "created_at": now_text(),
         "updated_at": now_text(),
@@ -302,8 +450,13 @@ def upsert_question(conn, data: dict[str, Any]) -> None:
     columns = [
         "id",
         "course_name",
+        "upload_file",
         "exam_unique_no",
         "cd_value",
+        "subject_name",
+        "chapter",
+        "section",
+        "learning_goal",
         "question_no",
         "question",
         "view_text",
@@ -327,6 +480,9 @@ def upsert_question(conn, data: dict[str, Any]) -> None:
         "reviewer",
         "reviewed_at",
         "reflect_status",
+        "review_check_labels",
+        "review_scope_summary",
+        "review_check_history",
         "raw_json",
         "created_at",
         "updated_at",
@@ -345,6 +501,114 @@ def upsert_question(conn, data: dict[str, Any]) -> None:
         col_clause = ", ".join(insert_columns)
         val_clause = ", ".join([f":{c}" for c in insert_columns])
         conn.execute(text(f"INSERT INTO questions ({col_clause}) VALUES ({val_clause})"), data)
+
+
+def upsert_cd_meta_map(conn, data: dict[str, Any]) -> None:
+    if not data.get("cd_value"):
+        return
+
+    columns = [
+        "cd_value", "subject_name", "chapter", "section", "learning_goal",
+        "raw_json", "created_at", "updated_at",
+    ]
+
+    existing = conn.execute(
+        text(
+            """
+            SELECT id FROM question_cd_meta_maps
+            WHERE TRIM(COALESCE(cd_value, '')) = TRIM(COALESCE(:cd_value, ''))
+            LIMIT 1
+            """
+        ),
+        data,
+    ).first()
+
+    if existing:
+        data = {**data, "id": existing[0]}
+        update_columns = [c for c in columns if c not in {"cd_value", "created_at"}]
+        set_clause = ", ".join([f"{c} = :{c}" for c in update_columns])
+        conn.execute(text(f"UPDATE question_cd_meta_maps SET {set_clause} WHERE id = :id"), data)
+    else:
+        col_clause = ", ".join(columns)
+        val_clause = ", ".join([f":{c}" for c in columns])
+        conn.execute(text(f"INSERT INTO question_cd_meta_maps ({col_clause}) VALUES ({val_clause})"), data)
+
+
+def get_cd_meta_by_cd_value(conn, cd_value: Any):
+    candidates = cd_value_candidates(cd_value)
+    if not candidates:
+        return None
+
+    params = {f"cd{i}": value for i, value in enumerate(candidates)}
+    where_clause = " OR ".join([f"TRIM(COALESCE(cd_value, '')) = :cd{i}" for i in range(len(candidates))])
+
+    return conn.execute(
+        text(
+            f"""
+            SELECT subject_name, chapter, section, learning_goal
+            FROM question_cd_meta_maps
+            WHERE {where_clause}
+            LIMIT 1
+            """
+        ),
+        params,
+    ).mappings().first()
+
+
+def apply_cd_meta_to_question(conn, data: dict[str, Any]) -> dict[str, Any]:
+    cd_value = normalize_cd_value(data.get("cd_value"))
+    if not cd_value:
+        return data
+
+    meta = get_cd_meta_by_cd_value(conn, cd_value)
+    if not meta:
+        return {**data, "cd_value": cd_value}
+
+    merged = dict(data)
+    merged["cd_value"] = cd_value
+    for key in ["subject_name", "chapter", "section", "learning_goal"]:
+        value = str(meta.get(key) or "").strip()
+        if value:
+            merged[key] = value
+    return merged
+
+
+def update_questions_from_cd_meta(conn, cd_value: str) -> int:
+    candidates = cd_value_candidates(cd_value)
+    if not candidates:
+        return 0
+
+    meta = get_cd_meta_by_cd_value(conn, candidates[0])
+    if not meta:
+        return 0
+
+    params = {
+        "normalized_cd_value": candidates[0],
+        "subject_name": str(meta.get("subject_name") or "").strip(),
+        "chapter": str(meta.get("chapter") or "").strip(),
+        "section": str(meta.get("section") or "").strip(),
+        "learning_goal": str(meta.get("learning_goal") or "").strip(),
+        "updated_at": now_text(),
+    }
+    params.update({f"cd{i}": value for i, value in enumerate(candidates)})
+    where_clause = " OR ".join([f"TRIM(COALESCE(cd_value, '')) = :cd{i}" for i in range(len(candidates))])
+
+    result = conn.execute(
+        text(
+            f"""
+            UPDATE questions
+            SET cd_value = :normalized_cd_value,
+                subject_name = CASE WHEN :subject_name != '' THEN :subject_name ELSE subject_name END,
+                chapter = CASE WHEN :chapter != '' THEN :chapter ELSE chapter END,
+                section = CASE WHEN :section != '' THEN :section ELSE section END,
+                learning_goal = CASE WHEN :learning_goal != '' THEN :learning_goal ELSE learning_goal END,
+                updated_at = :updated_at
+            WHERE {where_clause}
+            """
+        ),
+        params,
+    )
+    return result.rowcount or 0
 
 
 def insert_target_map(conn, data: dict[str, Any]) -> None:
@@ -394,11 +658,11 @@ def get_questions():
     with engine.begin() as conn:
         rows = conn.execute(
             text(
-                """
+                f"""
                 SELECT * FROM questions
                 ORDER BY
                 exam_unique_no ASC,
-                CAST(question_no AS INTEGER) ASC,
+                {QUESTION_NO_ORDER_SQL},
                 question_no ASC,
                 id ASC
                 """
@@ -446,9 +710,10 @@ async def upload_excel(
 
             if is_question_sheet(df):
                 for _, row in df.iterrows():
-                    data = normalize_question_row(row, default_course_name=course_name.strip())
+                    data = normalize_question_row(row, default_course_name=course_name.strip(), default_upload_file=filename)
                     if not data.get("question_no"):
                         continue
+                    data = apply_cd_meta_to_question(conn, data)
                     upsert_question(conn, data)
                     question_count += 1
                 continue
@@ -465,13 +730,72 @@ async def upload_excel(
     }
 
 
+@app.get("/api/cd-meta")
+def get_cd_meta_maps():
+    init_db()
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT * FROM question_cd_meta_maps ORDER BY id DESC")).mappings().all()
+    return {"items": [dict(row) for row in rows]}
+
+
+@app.post("/api/cd-meta/upload-excel")
+async def upload_cd_meta_excel(file: UploadFile = File(...)):
+    init_db()
+    filename = file.filename or "cd_meta.xlsx"
+    contents = await file.read()
+
+    try:
+        if filename.lower().endswith(".csv"):
+            df = normalize_headers(pd.read_csv(BytesIO(contents)))
+            sheets = {"csv": df}
+        else:
+            raw_sheets = pd.read_excel(BytesIO(contents), sheet_name=None)
+            sheets = {name: normalize_headers(df) for name, df in raw_sheets.items()}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"CD 매핑 엑셀 파일을 읽을 수 없습니다: {e}")
+
+    cd_meta_count = 0
+    updated_question_count = 0
+    skipped_sheets = []
+
+    with engine.begin() as conn:
+        for sheet_name, df in sheets.items():
+            if df.empty:
+                continue
+
+            if not is_cd_meta_sheet(sheet_name, df):
+                skipped_sheets.append(str(sheet_name))
+                continue
+
+            for _, row in df.iterrows():
+                data = normalize_cd_meta_row(row)
+                if not data.get("cd_value"):
+                    continue
+                upsert_cd_meta_map(conn, data)
+                cd_meta_count += 1
+                updated_question_count += update_questions_from_cd_meta(conn, data["cd_value"])
+
+    return {
+        "ok": True,
+        "filename": filename,
+        "cd_meta_upserted": cd_meta_count,
+        "questions_updated": updated_question_count,
+        "skipped_sheets": skipped_sheets,
+    }
+
+
 @app.put("/api/questions/{question_id}")
 def update_question(question_id: int, payload: dict):
     init_db()
     allowed = {
         "course_name",
+        "upload_file",
         "exam_unique_no",
         "cd_value",
+        "subject_name",
+        "chapter",
+        "section",
+        "learning_goal",
         "question_no",
         "question",
         "view_text",
@@ -494,6 +818,9 @@ def update_question(question_id: int, payload: dict):
         "suggestion",
         "reviewer",
         "reflect_status",
+        "review_check_labels",
+        "review_scope_summary",
+        "review_check_history",
     }
     update_data = {key: value for key, value in payload.items() if key in allowed}
     update_data["reviewed_at"] = now_text()
@@ -611,7 +938,13 @@ def get_questions_for_target_map(
             raise HTTPException(status_code=404, detail="매핑 정보를 찾을 수 없습니다.")
 
         rows = conn.execute(
-            text("SELECT * FROM questions WHERE exam_unique_no = :exam_unique_no ORDER BY CAST(question_no AS INTEGER), id ASC"),
+            text(
+                f"""
+                SELECT * FROM questions
+                WHERE exam_unique_no = :exam_unique_no
+                ORDER BY {QUESTION_NO_ORDER_SQL}, id ASC
+                """
+            ),
             {"exam_unique_no": target["exam_unique_no"]},
         ).mappings().all()
 
@@ -634,6 +967,7 @@ def reset_database(confirm: str = Query("", description="YES 입력 시 전체 �
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM questions"))
         conn.execute(text("DELETE FROM review_target_maps"))
+        conn.execute(text("DELETE FROM question_cd_meta_maps"))
     return {"ok": True}
 
 

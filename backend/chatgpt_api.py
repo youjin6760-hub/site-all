@@ -13,6 +13,14 @@ from openai import OpenAI, RateLimitError
 from dotenv import load_dotenv
 from openpyxl import Workbook, load_workbook
 
+from prompt_builder import (
+    build_review_prompt,
+    is_check_enabled,
+    merge_review_checks,
+    should_run_content_review,
+    should_run_format_review,
+)
+
 
 ROOT = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent)).resolve()
 
@@ -31,17 +39,25 @@ CHATGPT_REASONING_EFFORT = os.getenv("CHATGPT_REASONING_EFFORT", "medium")
 MAX_QUESTION_IMAGES = 2
 MAX_CHOICE_IMAGES = 4
 MAX_EXPLANATION_IMAGES = 2
+MAX_PER_QUESTION_API_RETRIES = 3
+MAX_CONSECUTIVE_REVIEW_FAILURES = 5
 
 
-def load_prompt_content():
-    with open(ROOT / "내용검수프롬프트.txt", "r", encoding="utf-8") as f:
-        return f.read()
+def get_selected_review_checks(review_checks: dict[str, Any] | None = None) -> dict[str, dict[str, bool]]:
+    """프론트에서 전달한 선택 검수값을 기본값과 병합합니다."""
+    return merge_review_checks(review_checks)
 
+def make_empty_review_result(question_id: str) -> dict:
+    return {
+        "question_id": question_id,
+        "content_issues": [],
+        "format_issues": [],
+        "summary": {
+            "has_issue": False,
+            "issue_count": 0,
+        },
+    }
 
-def load_prompt_format():
-    with open(ROOT / "형식검수프롬프트.txt", "r", encoding="utf-8") as f:
-        return f.read()
-    
 
 def guess_media_type(path: Path) -> str:
     mime, _ = mimetypes.guess_type(str(path))
@@ -110,12 +126,10 @@ ISSUE_HEADERS = [
     "question_no",
     "subject_name",
     "sub_title",
-    "severity",
     "issue_area",
     "issue_type",
-    "error_code",
     "reason",
-    "suggestion" 
+    "suggestion",
 ]
 
 FORMULA_HEADERS = [
@@ -140,25 +154,6 @@ def last_non_empty_row(ws):
         ):
             return row
     return 0
-
-
-# 각 오류 항목에 숫자 부여
-ERROR_CODES = {
-    "문제 성립 오류": 1,
-    "정답 불일치": 2,
-    "해설 내용 오류": 3,
-    "선지-해설 불일치": 4,
-    "표현 오류": 5,
-    "기타 내용 오류": 6,
-    "해설 시작 형식 오류": 7,
-    "선지별 해설 누락": 8,
-    "선지 해설 형식 오류": 9,
-    "정답 문장 중복": 10,
-    "결론 누락": 11,
-    "최종 문장 형식 오류": 12,
-    "기타 형식 오류": 13,
-    "긴 해설 수동 검토 필요": 14
-}
 
 
 def save_issue_rows_to_xlsx(issue_rows):
@@ -204,20 +199,16 @@ def save_issue_rows_to_xlsx(issue_rows):
             else:
                 next_row = last_row + 1
 
-        error_code = ERROR_CODES.get(row_data["issue_type"], 0)
-
         row_values = [
             row_data["question_id"],
             row_data["file_name"],
             row_data["question_no"],
             row_data["subject_name"],
             row_data["sub_title"],
-            row_data["severity"],
             row_data["issue_area"],
             row_data["issue_type"],
-            error_code,
             row_data["reason"],
-            row_data["suggestion"]
+            row_data["suggestion"],
         ]
 
         for col_idx, value in enumerate(row_values, start=1):
@@ -245,6 +236,53 @@ def has_formula_explanation(data: dict):
 
 def is_cancel_exception(error: Exception) -> bool:
     return error.__class__.__name__ == "JobCancelled"
+
+def is_fatal_review_error(error: Exception) -> bool:
+    """
+    스킵하면 안 되는 시스템성 오류를 구분합니다.
+
+    이런 오류는 개별 문제 문제가 아니라 설정/인증/모델 문제일 가능성이 크므로
+    즉시 중단해서 app.py에서 partial_failed 또는 failed 처리되게 합니다.
+    """
+    error_name = error.__class__.__name__
+    text = str(error).lower()
+
+    fatal_error_names = {
+        "AuthenticationError",
+        "PermissionDeniedError",
+        "NotFoundError",
+    }
+
+    if error_name in fatal_error_names:
+        return True
+
+    fatal_keywords = [
+        "api key",
+        "invalid api key",
+        "incorrect api key",
+        "authentication",
+        "permission",
+        "insufficient_quota",
+        "billing",
+        "model",
+        "does not exist",
+        "not found",
+        "unsupported model",
+    ]
+
+    return any(keyword in text for keyword in fatal_keywords)
+
+
+def save_review_errors(skipped_errors: list[dict[str, Any]]) -> None:
+    if not skipped_errors:
+        return
+
+    error_path = REVIEWED_DIR.parent / "review_errors.json"
+
+    with open(error_path, "w", encoding="utf-8") as f:
+        json.dump(skipped_errors, f, ensure_ascii=False, indent=2)
+
+    print(f"[REVIEW 오류 목록 저장] {error_path}")
 
 def save_formula_rows_to_xlsx(formula_rows):
     if not formula_rows:
@@ -313,7 +351,7 @@ def save_formula_rows_to_xlsx(formula_rows):
 # =========================
 # API 입력 구성
 # =========================
-def build_user_content(prompt: str, question_data: dict, mode: str) -> list[dict]:
+def build_user_content(prompt: str, question_data: dict, mode: str, review_checks: dict[str, Any] | None = None) -> list[dict]:
     blocks: list[dict] = []
 
     data = question_data.get("data", {}) or {}
@@ -326,66 +364,155 @@ def build_user_content(prompt: str, question_data: dict, mode: str) -> list[dict
     body = data.get("body", "")
     extra_text = data.get("extra_text", "")
     choices = data.get("choices", [])
+    selected_checks = get_selected_review_checks(review_checks)
+    run_content = should_run_content_review(selected_checks)
+    run_format = should_run_format_review(selected_checks)
 
-    choice_mapping_text = "\n".join(
-        f"{idx}. {choice}"
-        for idx, choice in enumerate(choices, start=1)
-    )
+    question_material_images = [
+        item for item in image_elements
+        if item.get("location") == "question"
+    ]
+
+    choice_material_images = [
+        item for item in image_elements
+        if item.get("location") == "choice"
+    ]
 
     review_json = json.dumps({
-        "body": data.get("body"),
-        "extra_text": data.get("extra_text"),
-        "choices": data.get("choices"),
-        "answer": data.get("answer"),
-        "explanation": data.get("explanation"),
-        "explanation_capture_meta": data.get("explanation_capture_meta"),
-        "image_elements": data.get("image_elements"),
-        "explanation_images": data.get("explanation_images"),
+        "problem": {
+            "question_text": data.get("body", ""),
+            "given_text": data.get("extra_text", ""),
+            "given_images": question_material_images,
+        },
+        "choices": data.get("choices", []),
+        "choice_images": choice_material_images,
+        "answer": data.get("answer", ""),
+        "keywords": data.get("keywords", data.get("keyword", "")),
+        "explanation": data.get("explanation", ""),
+        "explanation_images": data.get("explanation_images", []),
+        "explanation_capture_meta": data.get("explanation_capture_meta", {}),
     }, ensure_ascii=False, indent=2)
+
+    choice_image_lines = []
+    for item in choice_material_images:
+        label = item.get("caption_or_near_text", "") or ""
+        file_name = Path(item.get("saved_path", "")).name
+        original_or_near = item.get("ocr_or_extracted_text", "") or ""
+
+        choice_image_lines.append(
+            f"- {label or 'choice'}: 첨부 이미지 파일={file_name}, 원본/근처텍스트={original_or_near}"
+        )
+
+    choice_image_reference_text = (
+        "\n".join(choice_image_lines)
+        if choice_image_lines
+        else "선지 이미지 없음"
+    )
         
-    if mode == "content":
-        matching_instruction = (
-            "\n[선지-해설 강제 매칭 검수]\n"
-            "다음 choices와 explanation의 선지별 해설을 반드시 번호별로 1:1 비교하세요.\n"
-            "번호가 같더라도 설명 내용이 다른 선지를 설명하면 '선지-해설 불일치'입니다.\n\n"
-            "이 검수는 반드시 수행해야 하며, 하나라도 불일치가 있으면 반드시 오류로 기록해야 합니다.\n\n"
-            f"[choices]\n{choice_mapping_text}\n\n"
-            f"[explanation]\n{data.get('explanation', '')}\n\n"
+    matching_parts = []
+
+    if (
+        selected_checks["content"].get("choice_explanation_match")
+        or selected_checks["format"].get("choice_explanation_exists")
+        or selected_checks["format"].get("choice_explanation_format")
+    ):
+        matching_parts.append(
+            "[선지/보기 해설 참고]\n"
+            "- choices와 explanation은 위 [문제 데이터 JSON]에 이미 포함되어 있습니다.\n"
+            "- 일반 문제는 choices와 explanation의 선지별 해설을 번호 기준으로 확인하세요.\n"
+            "- 보기제시형(ㄱ/ㄴ/ㄷ/ㄹ, A/B/C 조합형)은 선택지 조합별 해설이 없어도 보기별 해설이 있으면 정상으로 보세요.\n"
         )
     else:
-        matching_instruction = (
-            "\n[형식 검수용 선지 정보]\n"
-            "아래 choices와 explanation은 선지 해설의 형식 확인용으로만 사용하세요.\n"
-            "선지 내용의 정오나 해설 논리 불일치는 판단하지 마세요.\n\n"
-            f"[choices]\n{choice_mapping_text}\n\n"
-            f"[explanation]\n{data.get('explanation', '')}\n\n"
+        matching_parts.append(
+            "[선지 정보]\n"
+            "- 필요한 경우 위 [문제 데이터 JSON]의 choices와 explanation을 참고하세요.\n"
         )
-        
-    question_items = [x for x in image_elements if x.get("location") == "question"]
-    choice_items = [x for x in image_elements if x.get("location") == "choice"]
 
-    if mode == "content":
-        extra_instruction = (
-            "- 텍스트 문제라도 반드시 문제 성립/정답/해설 논리 검수를 수행하세요.\n"
+    if question_material_images:
+        matching_parts.append(
+            "[보기/제시자료 이미지 특별 검수 기준]\n"
+            "- 이 문제는 보기/제시자료가 이미지로 제공될 수 있습니다.\n"
+            "- problem.given_text가 비어 있거나 일부만 있어도, problem.given_images에 첨부된 이미지를 실제 보기/제시자료 원문으로 간주하세요.\n"
+            "- 보기 이미지 안의 표, 행, 열, 값, 조건, 코드, 수식, ERD, 그림을 먼저 읽고 문제 성립 여부와 정답/해설을 검수하세요.\n"
+            "- 해설이 보기 이미지의 값, 조건, 표 구조, 행/열 결과와 다르면 내용 오류 또는 해설 내용 오류로 기록하세요.\n"
+            "- 이미지 내용을 확정적으로 읽을 수 없으면 임의로 내용 오류를 만들지 마세요. 단, 이미지가 없거나 잘못 캡처되어 문제 풀이 자체가 불가능하면 '문제 성립 오류'로 기록하세요.\n"
+            "- 보기 이미지가 문제 풀이의 핵심인데 첨부되지 않았거나 잘못 캡처되었으면 문제 성립 오류로 기록하세요.\n"
+        )
+
+    if choice_material_images:
+        matching_parts.append(
+            "[이미지 선지 특별 검수 기준]\n"
+            "- 이 문제는 선택지 자체가 이미지일 수 있습니다.\n"
+            "- choices 배열의 '[이미지 선지: 파일명]'은 실제 선지 내용이 아니라 표시용 파일명입니다.\n"
+            "- 이미지 선지가 있는 경우, choices 텍스트가 아니라 첨부된 선지 이미지를 실제 선지 원문으로 간주하세요.\n"
+            "- 각 선지 이미지의 표/행/열/값을 먼저 읽고, explanation의 선지별 설명과 번호 기준으로 비교하세요.\n"
+            "- SQL 실행 결과표, MERGE/UPDATE/INSERT/DELETE 결과표 이미지는 행 식별자와 갱신 대상 컬럼을 기준으로 행 단위 비교하세요.\n"
+            "- 해설이 이미지에 없는 값, 누락된 행, 잘못된 결과, 다른 선지의 내용을 설명하면 '선지-해설 불일치'로 기록하세요.\n"
+            "- 이미지에 정상적으로 존재하는 행을 해설이 오류라고 설명하거나, 이미지의 실제 오류 행/값과 다른 행/값을 오답 근거로 설명하면 '선지-해설 불일치'로 기록하세요.\n"
+            "- 정답 번호가 맞더라도, 해설이 해당 이미지 선지의 오답 근거를 잘못 설명하면 '선지-해설 불일치'로 기록하세요.\n"
+            "- 이미지에서 일부 행/값이 명확히 읽히면 그 읽힌 범위는 확정 근거로 사용하세요. 이미지 전체가 완벽히 읽히지 않는다는 이유로 명확히 보이는 행/값 비교를 생략하지 마세요.\n"
+            "- 정답 검수도 이미지 선지의 실제 내용 기준으로 판단하세요.\n"
+            "- 이미지 내용을 확정적으로 읽을 수 없으면 임의로 내용 오류를 만들지 마세요. 단, 이미지가 없거나 잘못 캡처되어 문제 풀이 자체가 불가능하면 '문제 성립 오류'로 기록하세요.\n"
+            "[선지 이미지 매핑]\n"
+            f"{choice_image_reference_text}\n"
+        )
+
+    matching_instruction = "\n".join(matching_parts)
+
+    question_items = question_material_images
+    choice_items = choice_material_images
+
+    extra_instruction_parts = []
+
+    if mode == "content" or (mode == "selected" and run_content):
+        extra_instruction_parts.append(
+            "[내용 검수 추가 지시]\n"
+            "- 텍스트 문제라도 선택된 내용 검수 항목은 반드시 수행하세요.\n"
             "- 형식 오류보다 문제 자체 오류를 우선 검수하세요.\n"
-            "- 이미지가 문제 풀이에 필수인데 없거나 잘못된 경우 반드시 문제 성립 오류로 판단하세요.\n"
-            "- 문제 이미지, 선지 이미지, 해설 스크린샷은 서로 독립적으로 검수하세요.\n"
+            "- 보기/제시자료 이미지가 문제 풀이에 필수인데 없거나 잘못된 경우 반드시 문제 성립 오류로 판단하세요.\n"
+            "- 보기/제시자료 이미지, 선지 이미지, 해설 스크린샷은 서로 독립적으로 검수하세요.\n"
+            "- 보기/제시자료 이미지가 있는 경우 problem.given_text만 보지 말고 첨부된 problem.given_images를 실제 보기/자료 원문으로 판단하세요.\n"
+            "- 보기 이미지의 표/행/열/값/조건과 해설 또는 정답 판단이 다르면 내용 오류로 기록하세요.\n"
+            "- 이미지 선지가 있는 경우 choices의 파일명 텍스트가 아니라 첨부된 선지 이미지를 실제 선지 내용으로 판단하세요.\n"
+            "- SQL 결과표 이미지 선지는 EMPNO, ID, KEY 같은 행 식별자와 SAL, AMOUNT, SCORE 같은 결과값 컬럼을 기준으로 해설의 오답 근거와 비교하세요.\n"
+            "- 이미지 내용을 확정적으로 읽을 수 없으면 임의로 내용 오류를 만들지 마세요. 단, 이미지가 없거나 잘못 캡처되어 문제 풀이 자체가 불가능하면 '문제 성립 오류'로 기록하세요.\n"
+            "- 키워드 검수가 선택된 경우 keywords가 문제의 핵심 개념과 맞는지, 누락되었거나 지나치게 넓지 않은지 확인하세요.\n"
             "- 문제 풀이가 불가능하면 다른 판단 없이 즉시 문제 성립 오류로 기록하세요.\n"
         )
-    elif mode == "format":
-        extra_instruction = (
-            "- 내용 정오, 정답 정합성, 문제 성립 여부는 검수하지 마세요.\n"
-            "- 해설 시작 문장, 선지별 해설 구조, 결론 문장, 정답 문장 중복, 긴 해설 수동 검토만 판단하세요.\n"
-            "- 이미지는 내용 검수에 사용하지 말고, 해설 구조 확인 참고용으로만 사용하세요.\n"
+
+    if mode == "format" or (mode == "selected" and run_format):
+        extra_instruction_parts.append(
+            "[형식 검수 추가 지시]\n"
+            "- 내용 정오, 정답 정합성, 문제 성립 여부는 내용 검수 항목이 선택된 경우에만 판단하세요.\n"
+            "- 선택된 형식 검수 항목만 판단하세요.\n"
+            "- ㄱ/ㄴ/ㄷ/ㄹ 보기제시형 문제는 선지별 조합 해설이 없어도 보기별 해설이 있으면 정상으로 보세요.\n"
+            "- 이미지 선지의 표/값/행 내용은 형식 검수에서 판단하지 마세요.\n"
+            "- 이미지 선지의 파일명, 백틱, 캡션, OCR성 텍스트를 근거로 표현 오류를 만들지 마세요.\n"
+            "- 이미지 선지가 있는 문제는 해설의 번호 구조와 문장 형식만 확인하고, 이미지 내용의 정오는 내용 검수로만 판단하세요.\n"
+            "- 이미지는 내용 검수에 사용하지 말고, 필요한 경우 해설 구조 확인 참고용으로만 사용하세요.\n"
         )
-    else:
-        extra_instruction = ""
+
+    if not extra_instruction_parts:
+        extra_instruction_parts.append(
+            "[검수 항목 없음]\n"
+            "- 선택된 검수 항목이 없으므로 content_issues와 format_issues를 빈 배열로 반환하세요.\n"
+        )
+
+    extra_instruction = "\n".join(extra_instruction_parts)
         
     blocks.append(
         make_text_block(
             f"{prompt}\n\n"
             f"[문제 데이터 JSON]\n"
             f"{review_json}\n\n"
+            f"[자료 구분]\n"
+            f"- problem.question_text: 문제 질문입니다.\n"
+            f"- problem.given_text: 보기/제시문 텍스트입니다.\n"
+            f"- problem.given_images: 보기/제시자료 이미지입니다. 표, 테이블, ERD, 그림, 수식 이미지가 여기에 포함될 수 있습니다.\n"
+            f"- choices: 정답 선택지입니다.\n"
+            f"- choice_images: 선지 자체가 이미지인 경우의 선지 이미지입니다.\n"
+            f"- explanation: 해설입니다.\n"
+            f"- keywords: 문제 분류용 키워드입니다. 키워드 검수가 선택된 경우 문제 핵심 개념과 일치하는지 확인하세요.\n\n"
             f"{matching_instruction}"
             f"[검수용 추가 정보]\n"
             f"{extra_instruction}"
@@ -402,36 +529,78 @@ def build_user_content(prompt: str, question_data: dict, mode: str) -> list[dict
         )
     )
 
-    if question_items:
-        blocks.append(make_text_block("[문제 이미지 검수 대상]"))
-        for idx, item in enumerate(question_items[:MAX_QUESTION_IMAGES], start=1):
-            saved_path = item.get("saved_path", "")
-            near = item.get("caption_or_near_text", "") or item.get("ocr_or_extracted_text", "")
-            label = f"문제 이미지 {idx}"
-            if near:
-                label += f" / {near}"
-            blocks.extend(make_image_block(saved_path, label))
-    else:
-        blocks.append(make_text_block("[문제 이미지 없음]"))
+    content_checks = selected_checks.get("content", {})
+    format_checks = selected_checks.get("format", {})
 
-    if choice_items:
-        blocks.append(make_text_block("[선지 이미지 검수 대상]"))
-        for idx, item in enumerate(choice_items[:MAX_CHOICE_IMAGES], start=1):
-            saved_path = item.get("saved_path", "")
-            near = item.get("caption_or_near_text", "") or item.get("ocr_or_extracted_text", "")
-            label = f"선지 이미지 {idx}"
-            if near:
-                label += f" / {near}"
-            blocks.extend(make_image_block(saved_path, label))
-    else:
-        blocks.append(make_text_block("[선지 이미지 없음]"))
+    needs_given_image_review = (
+        mode == "content"
+        or review_checks is None
+        or content_checks.get("problem_validity")
+        or content_checks.get("image_validation")
+        or content_checks.get("answer_validation")
+        or content_checks.get("answer_correctness")
+        or content_checks.get("explanation_logic")
+    )
 
-    if explanation_images:
-        blocks.append(make_text_block("[해설 스크린샷 검수 대상]"))
-        for idx, path_str in enumerate(explanation_images[:MAX_EXPLANATION_IMAGES], start=1):
-            blocks.extend(make_image_block(str(path_str), f"해설 스크린샷 {idx}"))
+    needs_choice_image_review = (
+        mode == "content"
+        or review_checks is None
+        or content_checks.get("problem_validity")
+        or content_checks.get("image_validation")
+        or content_checks.get("answer_validation")
+        or content_checks.get("answer_correctness")
+        or content_checks.get("choice_explanation_match")
+    )
+
+    needs_explanation_image_review = (
+        mode in {"content", "format"}
+        or review_checks is None
+        or content_checks.get("expression_error")
+    )
+
+    include_question_images = bool(question_items and needs_given_image_review)
+    include_choice_images = bool(choice_items and needs_choice_image_review)
+    include_explanation_images = bool(explanation_images and needs_explanation_image_review)
+
+    if include_question_images:
+        if question_items:
+            blocks.append(make_text_block("[보기/제시자료 이미지 검수 대상]"))
+            for idx, item in enumerate(question_items[:MAX_QUESTION_IMAGES], start=1):
+                saved_path = item.get("saved_path", "")
+                near = item.get("caption_or_near_text", "") or item.get("ocr_or_extracted_text", "")
+                label = f"보기/제시자료 이미지 {idx}"
+                if near:
+                    label += f" / {near}"
+                blocks.extend(make_image_block(saved_path, label))
+        else:
+            blocks.append(make_text_block("[보기/제시자료 이미지 없음]"))
     else:
-        blocks.append(make_text_block("[해설 스크린샷 없음]"))
+        blocks.append(make_text_block("[보기/제시자료 이미지 첨부 생략] 이미지 관련 내용 검수가 선택되지 않았습니다."))
+
+    if include_choice_images:
+        if choice_items:
+            blocks.append(make_text_block("[선지 이미지 검수 대상]"))
+            for idx, item in enumerate(choice_items[:MAX_CHOICE_IMAGES], start=1):
+                saved_path = item.get("saved_path", "")
+                near = item.get("caption_or_near_text", "") or item.get("ocr_or_extracted_text", "")
+                label = f"선지 이미지 {idx}"
+                if near:
+                    label += f" / {near}"
+                blocks.extend(make_image_block(saved_path, label))
+        else:
+            blocks.append(make_text_block("[선지 이미지 없음]"))
+    else:
+        blocks.append(make_text_block("[선지 이미지 첨부 생략] 선지 이미지 관련 검수가 선택되지 않았습니다."))
+
+    if include_explanation_images:
+        if explanation_images:
+            blocks.append(make_text_block("[해설 스크린샷 검수 대상]"))
+            for idx, path_str in enumerate(explanation_images[:MAX_EXPLANATION_IMAGES], start=1):
+                blocks.extend(make_image_block(str(path_str), f"해설 스크린샷 {idx}"))
+        else:
+            blocks.append(make_text_block("[해설 스크린샷 없음]"))
+    else:
+        blocks.append(make_text_block("[해설 스크린샷 첨부 생략] 해설 이미지/긴 해설 검수가 선택되지 않았습니다."))
 
     return blocks
 
@@ -463,7 +632,7 @@ def extract_json_from_text(text: str) -> dict:
     raise ValueError("응답에서 JSON 객체를 찾지 못했습니다.")
 
 
-def parse_review_response(text: str, question_id: str, mode: str) -> dict:
+def parse_review_response(text: str, question_id: str, mode: str, fallback_issue_area: str | None = None) -> dict:
     try:
         return extract_json_from_text(text)
 
@@ -476,34 +645,22 @@ def parse_review_response(text: str, question_id: str, mode: str) -> dict:
         with open(debug_path, "w", encoding="utf-8") as f:
             f.write(text)
 
+        issue_area = fallback_issue_area or ("content" if mode == "content" else "format")
         issue = {
-            "type": "기타 내용 오류" if mode == "content" else "기타 형식 오류",
+            "type": "기타 내용 오류" if issue_area == "content" else "기타 형식 오류",
             "reason": f"검수 결과를 JSON으로 파싱하지 못했습니다. 원문 응답 저장: {debug_path.name}",
             "suggestion": "debug_api_response 폴더의 원문 응답을 확인하세요.",
-            "confidence": 1.0
         }
 
         return {
             "question_id": question_id,
-            "content_issues": [issue] if mode == "content" else [],
-            "format_issues": [issue] if mode == "format" else [],
+            "content_issues": [issue] if issue_area == "content" else [],
+            "format_issues": [issue] if issue_area == "format" else [],
             "summary": {
                 "has_issue": True,
-                "severity": "medium"
+                "issue_count": 1,
             }
         }
-
-def merge_severity(sev1: str, sev2: str) -> str:
-    order = {
-        "low": 1,
-        "medium": 2,
-        "high": 3
-    }
-
-    s1 = sev1 if sev1 in order else "low"
-    s2 = sev2 if sev2 in order else "low"
-
-    return s1 if order[s1] >= order[s2] else s2
 
 
 def is_false_positive_normal_issue(issue: dict) -> bool:
@@ -564,6 +721,16 @@ def normalize_issue_key(issue: dict) -> str:
 
     text = f"{issue_type} {reason} {suggestion}"
 
+    # 정답 문장 중복 묶기 - 해설 시작 형식 오류보다 먼저 처리
+    if (
+        issue_type == "정답 문장 중복"
+        or (
+            "정답은" in text
+            and any(w in text for w in ["반복", "중복", "다시 등장", "한 번 더"])
+        )
+    ):
+        return "정답 문장 중복"
+
     # 해설 시작 형식 오류 묶기
     if (
         issue_type == "해설 시작 형식 오류"
@@ -575,16 +742,6 @@ def normalize_issue_key(issue: dict) -> str:
         or "정답은 [숫자]번입니다" in text
     ):
         return "해설 시작 형식 오류"
-
-    # 정답 문장 중복 묶기
-    if (
-        issue_type == "정답 문장 중복"
-        or (
-            "정답은" in text
-            and any(w in text for w in ["반복", "중복", "다시 등장", "한 번 더"])
-        )
-    ):
-        return "정답 문장 중복"
 
     # 선지 해설 형식 오류 묶기
     if (
@@ -648,34 +805,26 @@ def dedupe_issues(issues: list) -> list:
     return result
 
 
-def merge_review_results(question_data: dict, content_result: dict, format_result: dict) -> dict:
-    content_issues = content_result.get("content_issues", []) or []
-    format_issues = format_result.get("format_issues", []) or []
+def merge_selected_review_result(
+    question_data: dict,
+    selected_result: dict,
+    review_checks: dict[str, Any] | None = None,
+) -> dict:
+    """선택형 통합 프롬프트 1회 호출 결과를 기존 reviewed JSON 구조로 맞춥니다."""
+    checks = get_selected_review_checks(review_checks)
+    run_content = any(checks["content"].values())
+    run_format = any(checks["format"].values())
 
-    # 1) 정상 판단을 issue로 잘못 작성한 항목 먼저 제거
-    content_issues = [
-        issue for issue in content_issues
-        if not is_false_positive_normal_issue(issue)
-    ]
+    content_issues = (selected_result.get("content_issues", []) or []) if run_content else []
+    format_issues = (selected_result.get("format_issues", []) or []) if run_format else []
 
-    format_issues = [
-        issue for issue in format_issues
-        if not is_false_positive_normal_issue(issue)
-    ]
+    content_issues = [issue for issue in content_issues if not is_false_positive_normal_issue(issue)]
+    format_issues = [issue for issue in format_issues if not is_false_positive_normal_issue(issue)]
 
-    # 2) 같은 원인의 오류 중복 제거
     content_issues = dedupe_issues(content_issues)
     format_issues = dedupe_issues(format_issues)
 
     has_issue = bool(content_issues or format_issues)
-
-    severity = merge_severity(
-        content_result.get("summary", {}).get("severity", "low"),
-        format_result.get("summary", {}).get("severity", "low")
-    )
-
-    if not has_issue:
-        severity = "low"
 
     return {
         **question_data,
@@ -683,9 +832,20 @@ def merge_review_results(question_data: dict, content_result: dict, format_resul
         "format_issues": format_issues,
         "summary": {
             "has_issue": has_issue,
-            "severity": severity
-        }
+            "issue_count": len(content_issues) + len(format_issues),
+        },
     }
+
+
+def refresh_review_summary(reviewed: dict) -> dict:
+    content_issues = reviewed.get("content_issues", []) or []
+    format_issues = reviewed.get("format_issues", []) or []
+
+    reviewed.setdefault("summary", {})
+    reviewed["summary"]["has_issue"] = bool(content_issues or format_issues)
+    reviewed["summary"]["issue_count"] = len(content_issues) + len(format_issues)
+
+    return reviewed
 
 
 def filter_no_issue_entries(reviewed):
@@ -742,15 +902,7 @@ def filter_no_issue_entries(reviewed):
         if not is_no_issue(issue)
     ]
 
-    reviewed.setdefault("summary", {})
-    reviewed["summary"]["has_issue"] = bool(
-        reviewed.get("content_issues", []) or reviewed.get("format_issues", [])
-    )
-
-    if not reviewed["summary"]["has_issue"]:
-        reviewed["summary"]["severity"] = "low"
-
-    return reviewed
+    return refresh_review_summary(reviewed)
 
 
 def filter_quote_false_positive_issues(reviewed):
@@ -793,16 +945,7 @@ def filter_quote_false_positive_issues(reviewed):
         if not is_quote_false_positive(issue)
     ]
 
-    # content_issues는 건드리지 않음
-    reviewed.setdefault("summary", {})
-    reviewed["summary"]["has_issue"] = bool(
-        reviewed.get("content_issues", []) or reviewed.get("format_issues", [])
-    )
-
-    if not reviewed["summary"]["has_issue"]:
-        reviewed["summary"]["severity"] = "low"
-
-    return reviewed
+    return refresh_review_summary(reviewed)
 
     
 def add_duplicate_answer_sentence_issue(reviewed: dict, question_data: dict) -> dict:
@@ -830,7 +973,6 @@ def add_duplicate_answer_sentence_issue(reviewed: dict, question_data: dict) -> 
         "type": "정답 문장 중복",
         "reason": "해설 첫 문장이 아닌 위치에 '정답은 X번입니다.' 형식의 문장이 등장하여 해설 형식 기준에 맞지 않습니다.",
         "suggestion": "해설 첫 문장을 정확히 '정답은 X번입니다.' 형식으로 작성하고, 해설 중간 또는 결론 문단 직전의 정답 문장은 삭제하세요.",
-        "confidence": 0.95
     }
 
     reviewed.setdefault("format_issues", [])
@@ -846,19 +988,65 @@ def add_duplicate_answer_sentence_issue(reviewed: dict, question_data: dict) -> 
     # 혹시 후처리 후에도 중복이 생겼을 경우 한 번 더 정리
     reviewed["format_issues"] = dedupe_issues(reviewed.get("format_issues", []))
 
-    reviewed.setdefault("summary", {})
-    reviewed["summary"]["has_issue"] = bool(
-        reviewed.get("content_issues", []) or reviewed.get("format_issues", [])
+    return refresh_review_summary(reviewed)
+
+
+def add_explanation_manual_review_issue(
+    reviewed: dict,
+    question_data: dict,
+    selected_checks: dict[str, Any],
+) -> dict:
+    format_checks = selected_checks.get("format", {}) or {}
+
+    if not format_checks.get("long_explanation_manual_check"):
+        return reviewed
+
+    data = question_data.get("data", {}) or {}
+    meta = data.get("explanation_capture_meta", {}) or {}
+
+    capture_mode = str(meta.get("capture_mode") or "")
+    needs_manual_review = bool(meta.get("needs_manual_review"))
+
+    manual_modes = {
+        "too_long_after_zoom",
+        "skipped",
+        "failed",
+    }
+
+    if capture_mode not in manual_modes and not needs_manual_review:
+        return reviewed
+
+    # not_needed / not_attempted는 수동 검토 대상으로 보지 않습니다.
+    if capture_mode in {"not_needed", "not_attempted"}:
+        return reviewed
+
+    issue = {
+        "type": "긴 해설 수동 검토 필요",
+        "reason": (
+            f"해설 캡처 결과 capture_mode='{capture_mode}', "
+            f"needs_manual_review={needs_manual_review}로 기록되어 "
+            "해설 전체의 수식/표현/렌더링 상태를 자동으로 확정 검수하기 어렵습니다."
+        ),
+        "suggestion": (
+            "관리자 화면에서 해설 전체 표시 여부와 수식/표/렌더링 깨짐 여부를 수동으로 확인하세요."
+        ),
+    }
+
+    reviewed.setdefault("format_issues", [])
+
+    already_exists = any(
+        str(i.get("type", "")) == "긴 해설 수동 검토 필요"
+        for i in reviewed.get("format_issues", [])
     )
 
-    if reviewed["summary"]["has_issue"] and reviewed["summary"].get("severity", "low") == "low":
-        reviewed["summary"]["severity"] = "medium"
+    if not already_exists:
+        reviewed["format_issues"].append(issue)
 
-    return reviewed
+    return refresh_review_summary(reviewed)
 
 
-def review_one(client, prompt: str, question_data: dict, mode: str) -> dict:
-    content = build_user_content(prompt, question_data, mode)
+def review_one(client, prompt: str, question_data: dict, mode: str, review_checks: dict[str, Any] | None = None, fallback_issue_area: str | None = None) -> dict:
+    content = build_user_content(prompt, question_data, mode, review_checks=review_checks)
 
     for attempt in range(5):
         try:
@@ -892,7 +1080,49 @@ def review_one(client, prompt: str, question_data: dict, mode: str) -> dict:
     text = getattr(resp, "output_text", "") or ""
     text = text.strip()
 
-    return parse_review_response(text, question_data.get("question_id", ""), mode)
+    return parse_review_response(text, question_data.get("question_id", ""), mode, fallback_issue_area=fallback_issue_area)
+
+def review_one_with_retries(
+    client,
+    prompt: str,
+    question_data: dict,
+    mode: str,
+    review_checks: dict[str, Any] | None = None,
+    fallback_issue_area: str | None = None,
+    max_retries: int = MAX_PER_QUESTION_API_RETRIES,
+) -> dict:
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return review_one(
+                client,
+                prompt,
+                question_data,
+                mode=mode,
+                review_checks=review_checks,
+                fallback_issue_area=fallback_issue_area,
+            )
+
+        except Exception as e:
+            if is_cancel_exception(e):
+                raise
+
+            if is_fatal_review_error(e):
+                raise
+
+            last_error = e
+
+            if attempt < max_retries:
+                wait = min(3 * attempt, 10)
+                print(
+                    f"[문제별 API 재시도] "
+                    f"{question_data.get('question_id', '')} "
+                    f"{attempt}/{max_retries} 실패: {e} / {wait}초 후 재시도"
+                )
+                time.sleep(wait)
+
+    raise RuntimeError(f"문제별 API 재시도 {max_retries}회 실패: {last_error}") from last_error
 
 def question_no_from_filename(path: Path):
     try:
@@ -933,10 +1163,17 @@ def review_raw_files(
     formula_xlsx_path: str | Path | None = None,
     write_excel: bool = True,
     cancel_checker=None,
+    review_checks: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    전달받은 raw JSON 파일 목록만 chatgpt로 검수합니다.
-    기존 TARGET_PREFIXES 방식 대신, 방금 수집한 job 폴더의 raw 파일만 넘기는 API용 함수입니다.
+    전달받은 raw JSON 파일 목록만 ChatGPT로 검수합니다.
+
+    실사용 정책:
+    - 개별 문제 API 오류: 최대 3회 재시도 후 스킵
+    - 스킵 문제: review_errors.json에 저장
+    - 연속 5개 실패: 시스템성 문제 가능성이 높으므로 중단
+    - 인증/API키/모델 설정 오류: 즉시 중단
+    - 사용자 취소: 즉시 중단
     """
     configure_review_dirs(
         raw_dir=RAW_DIR,
@@ -953,14 +1190,20 @@ def review_raw_files(
 
     client = OpenAI(
         api_key=api_key,
-        timeout=120
+        timeout=120,
     )
-    prompt_content = load_prompt_content()
-    prompt_format = load_prompt_format()
+
+    selected_checks = get_selected_review_checks(review_checks)
+    selected_prompt = build_review_prompt(selected_checks)
+    run_content = should_run_content_review(selected_checks)
+    run_format = should_run_format_review(selected_checks)
 
     issue_rows: list[dict[str, Any]] = []
     formula_rows: list[dict[str, Any]] = []
     reviewed_results: list[dict[str, Any]] = []
+    skipped_errors: list[dict[str, Any]] = []
+
+    consecutive_failures = 0
 
     if raw_files is None:
         raw_paths = sorted(RAW_DIR.glob("*.json"), key=question_no_from_filename)
@@ -971,104 +1214,160 @@ def review_raw_files(
         print("[정보] 검수할 raw JSON이 없습니다.")
         return []
 
-    for raw_file in raw_paths:
-        check_cancel(cancel_checker)
-
-        with open(raw_file, "r", encoding="utf-8") as f:
-            question_data = json.load(f)
-
-        try:
+    try:
+        for raw_file in raw_paths:
             check_cancel(cancel_checker)
 
-            content_result = review_one(client, prompt_content, question_data, mode="content")
+            with open(raw_file, "r", encoding="utf-8") as f:
+                question_data = json.load(f)
 
-            check_cancel(cancel_checker)
+            try:
+                check_cancel(cancel_checker)
 
-            format_result = review_one(client, prompt_format, question_data, mode="format")
+                if not run_content and not run_format:
+                    selected_result = make_empty_review_result(
+                        question_data.get("question_id", "")
+                    )
+                else:
+                    fallback_area = "content" if run_content else "format"
+                    selected_result = review_one_with_retries(
+                        client,
+                        selected_prompt,
+                        question_data,
+                        mode="selected",
+                        review_checks=selected_checks,
+                        fallback_issue_area=fallback_area,
+                    )
 
-            check_cancel(cancel_checker)
-            
-            merged = merge_review_results(question_data, content_result, format_result)
-            merged = filter_no_issue_entries(merged)
-            merged = filter_quote_false_positive_issues(merged)
-            merged = add_duplicate_answer_sentence_issue(merged, question_data)
+                check_cancel(cancel_checker)
 
-        except Exception as e:
-            if is_cancel_exception(e):
-                raise
+                merged = merge_selected_review_result(
+                    question_data,
+                    selected_result,
+                    selected_checks,
+                )
+                merged = filter_no_issue_entries(merged)
+                merged = filter_quote_false_positive_issues(merged)
 
-            print(f"[SKIP API 오류] {raw_file.name}: {e}")
-            continue
+                if is_check_enabled(selected_checks, "format", "duplicate_answer_sentence"):
+                    merged = add_duplicate_answer_sentence_issue(merged, question_data)
 
-        out_path = REVIEWED_DIR / raw_file.name
+                merged = add_explanation_manual_review_issue(
+                    merged,
+                    question_data,
+                    selected_checks,
+                )
 
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                if is_cancel_exception(e):
+                    raise
 
-        reviewed_results.append(merged)
+                if is_fatal_review_error(e):
+                    print(f"[치명적 API/설정 오류] {raw_file.name}: {e}")
+                    raise
 
-        if merged["summary"].get("has_issue") is True:
-            issues = []
+                consecutive_failures += 1
 
-            for issue in merged.get("content_issues", []):
-                issues.append(("content", issue))
+                error_item = {
+                    "file_name": raw_file.name,
+                    "question_id": question_data.get("question_id", ""),
+                    "question_no": question_data.get("question_no", ""),
+                    "error_type": e.__class__.__name__,
+                    "error_message": str(e),
+                    "consecutive_failures": consecutive_failures,
+                }
+                skipped_errors.append(error_item)
 
-            for issue in merged.get("format_issues", []):
-                issues.append(("format", issue))
+                print(
+                    f"[SKIP API 오류] {raw_file.name}: {e} "
+                    f"/ 연속 실패 {consecutive_failures}개"
+                )
 
-            for issue_area, issue in issues:
-                row_data = {
+                if consecutive_failures >= MAX_CONSECUTIVE_REVIEW_FAILURES:
+                    raise RuntimeError(
+                        f"API 검수 오류가 연속 {MAX_CONSECUTIVE_REVIEW_FAILURES}개 발생하여 "
+                        f"작업을 중단합니다. 마지막 오류: {raw_file.name} / {e}"
+                    ) from e
+
+                continue
+
+            # 성공하면 연속 실패 카운트 초기화
+            consecutive_failures = 0
+
+            out_path = REVIEWED_DIR / raw_file.name
+
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(merged, f, ensure_ascii=False, indent=2)
+
+            reviewed_results.append(merged)
+
+            if merged["summary"].get("has_issue") is True:
+                issues = []
+
+                for issue in merged.get("content_issues", []):
+                    issues.append(("content", issue))
+
+                for issue in merged.get("format_issues", []):
+                    issues.append(("format", issue))
+
+                for issue_area, issue in issues:
+                    row_data = {
+                        "question_id": merged.get("question_id", ""),
+                        "file_name": raw_file.name,
+                        "question_no": merged.get("question_no", ""),
+                        "subject_name": merged.get("subject_name", ""),
+                        "sub_title": merged.get("sub_title", ""),
+                        "issue_area": issue_area,
+                        "issue_type": issue.get("type", ""),
+                        "reason": issue.get("reason", ""),
+                        "suggestion": issue.get("suggestion", ""),
+                    }
+
+                    print(
+                        f"[ISSUE 행 추가] {raw_file.name} "
+                        f"/ {issue_area} / {issue.get('type', '')}"
+                    )
+                    issue_rows.append(row_data)
+
+                print(f"[ISSUE XLSX 기록] {raw_file.name}")
+
+            data = question_data.get("data", {}) or {}
+            has_formula, formula_reason = has_formula_explanation(data)
+
+            if has_formula:
+                expl_images = data.get("explanation_images", []) or []
+                expl_meta = data.get("explanation_capture_meta", {}) or {}
+
+                formula_rows.append({
                     "question_id": merged.get("question_id", ""),
                     "file_name": raw_file.name,
                     "question_no": merged.get("question_no", ""),
                     "subject_name": merged.get("subject_name", ""),
                     "sub_title": merged.get("sub_title", ""),
-                    "severity": merged.get("summary", {}).get("severity", ""),
-                    "issue_area": issue_area,
-                    "issue_type": issue.get("type", ""),
-                    "reason": issue.get("reason", ""),
-                    "suggestion": issue.get("suggestion", ""),
-                }
+                    "has_formula_explanation": True,
+                    "explanation_image_count": len(expl_images),
+                    "capture_mode": expl_meta.get("capture_mode", ""),
+                    "needs_manual_review": expl_meta.get("needs_manual_review", ""),
+                    "explanation_images": " | ".join(map(str, expl_images)),
+                    "formula_reason": formula_reason,
+                })
 
-                print(f"[ISSUE 행 추가] {raw_file.name} / {issue_area} / {issue.get('type', '')}")
-                issue_rows.append(row_data)
+                print(f"[FORMULA 행 추가] {raw_file.name} / {formula_reason}")
 
-            print(f"[ISSUE XLSX 기록] {raw_file.name}")
+            print(
+                f"[REVIEW 저장] {out_path.name} "
+                f"/ issue={merged['summary'].get('has_issue')} "
+                f"/ issue_count={merged['summary'].get('issue_count')}"
+            )
 
-        data = question_data.get("data", {}) or {}
-        has_formula, formula_reason = has_formula_explanation(data)
+            time.sleep(0.1)
 
-        if has_formula:
-            expl_images = data.get("explanation_images", []) or []
-            expl_meta = data.get("explanation_capture_meta", {}) or {}
+    finally:
+        save_review_errors(skipped_errors)
 
-            formula_rows.append({
-                "question_id": merged.get("question_id", ""),
-                "file_name": raw_file.name,
-                "question_no": merged.get("question_no", ""),
-                "subject_name": merged.get("subject_name", ""),
-                "sub_title": merged.get("sub_title", ""),
-                "has_formula_explanation": True,
-                "explanation_image_count": len(expl_images),
-                "capture_mode": expl_meta.get("capture_mode", ""),
-                "needs_manual_review": expl_meta.get("needs_manual_review", ""),
-                "explanation_images": " | ".join(map(str, expl_images)),
-                "formula_reason": formula_reason,
-            })
-
-            print(f"[FORMULA 행 추가] {raw_file.name} / {formula_reason}")
-
-        print(
-            f"[REVIEW 저장] {out_path.name} "
-            f"/ issue={merged['summary'].get('has_issue')} "
-            f"/ severity={merged['summary'].get('severity')}"
-        )
-
-        time.sleep(0.5)
-
-    if write_excel:
-        save_issue_rows_to_xlsx(issue_rows)
-        save_formula_rows_to_xlsx(formula_rows)
+        if write_excel and reviewed_results:
+            save_issue_rows_to_xlsx(issue_rows)
+            save_formula_rows_to_xlsx(formula_rows)
 
     return reviewed_results
 
@@ -1080,6 +1379,7 @@ def review_job_dir(
     job_dir: str | Path,
     write_excel: bool = True,
     cancel_checker=None,
+    review_checks: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """job_dir/raw 안의 JSON만 검수하고 job_dir/reviewed_json에 결과를 저장합니다."""
     job_dir = Path(job_dir).resolve()
@@ -1101,6 +1401,7 @@ def review_job_dir(
         formula_xlsx_path=job_dir / "formula.xlsx",
         write_excel=write_excel,
         cancel_checker=cancel_checker,
+        review_checks=review_checks,
     )
 
 

@@ -6,8 +6,6 @@ from urllib.parse import urlparse, urljoin, parse_qs
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-import time
-import uuid
 from typing import Any
 
 
@@ -190,13 +188,6 @@ def sanitize_text(value: str) -> str:
 def safe_text(locator):
     try:
         return sanitize_text(locator.inner_text())
-    except Exception:
-        return ""
-
-
-def safe_attr(locator, attr_name: str):
-    try:
-        return locator.get_attribute(attr_name) or ""
     except Exception:
         return ""
 
@@ -500,16 +491,6 @@ def click_subject_target(page, target):
         print(f"[오류] 대상 클릭 실패: {e}")
         save_debug(page, f"subject_target_click_fail_{norm_id_text(target.get('subject_name', 'unknown'))}")
         return False
-
-
-def get_bottom_sheet_container_box(page):
-    try:
-        container = page.locator("div.container").first
-        if container.count() == 0:
-            return None
-        return container.bounding_box()
-    except Exception:
-        return None
     
     
 def is_bottom_sheet_low_enough(page):
@@ -936,8 +917,6 @@ def prepare_element_capture_above_container(page, locator, top_margin=80):
 
 def capture_explanation_images(page, question_id):
     saved_paths = []
-    applied_zoom = 1.0
-
     meta = {
         "attempted": True,
         "zoom_applied": False,
@@ -1017,7 +996,6 @@ def capture_explanation_images(page, question_id):
                 if not set_page_zoom(page, zoom):
                     continue
 
-                applied_zoom = zoom
                 meta["zoom_applied"] = True
 
                 page.wait_for_timeout(500)
@@ -2339,37 +2317,7 @@ def extract_question(page, course_name, set_name, subject_name, capture_assets=T
         }
     }
 
-# txt      
-def append_manual_review_if_new(q):
-    review_items = []
-
-    expl_meta = q["data"].get("explanation_capture_meta", {})
-    if expl_meta.get("needs_manual_review"):
-        review_items.append(("explanation", expl_meta.get("capture_mode")))
-
-    qimg_meta = q["data"].get("question_image_capture_meta", {})
-    if qimg_meta.get("needs_manual_review"):
-        review_items.append(("question_image", qimg_meta.get("capture_mode")))
-
-    if not review_items:
-        return
-
-    review_path = RAW_DIR / "manual_review_items.txt"
-    qid = q["question_id"]
-
-    existing = set()
-    if review_path.exists():
-        with open(review_path, "r", encoding="utf-8") as rf:
-            for line in rf:
-                existing.add(line.strip())
-
-    with open(review_path, "a", encoding="utf-8") as rf:
-        for item_type, mode in review_items:
-            line = f"{qid}\t{item_type}\t{mode}"
-            if line not in existing:
-                rf.write(line + "\n")
-                
-                
+              
 def check_cancel(cancel_checker=None):
     if cancel_checker is not None:
         cancel_checker()
@@ -2502,9 +2450,6 @@ def run_collect_configs(
                                                 print(f"[RAW 저장] {file_path.name}")
 
 
-                                            append_manual_review_if_new(q)
-
-
                                             if q["question_no"] >= end_no:
                                                 break
 
@@ -2569,8 +2514,6 @@ def run_collect_configs(
                                             json.dump(q, f, ensure_ascii=False, indent=2)
                                         print(f"[RAW 저장] {file_path.name}")
                                         
-                                    append_manual_review_if_new(q)
-
                                     if q["question_no"] >= end_no:
                                         break
 

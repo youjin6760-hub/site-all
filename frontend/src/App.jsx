@@ -11,7 +11,8 @@ const CONTENT_ERROR_TYPES = [
   "정답 불일치",
   "해설 내용 오류",
   "선지-해설 불일치",
-  "표현 오류",
+  "표현/렌더링 오류",
+  "키워드 오류",
   "기타 내용 오류",
 ];
 
@@ -32,8 +33,10 @@ const LEGACY_FORMAT_ERROR_TYPES = [
 
 const DEFAULT_FILTERS = {
   courseName: "전체",
+  setName: "전체",
   examUniqueNo: "전체",
   subjectName: "전체",
+  subtypeName: "전체",
   cdValue: "전체",
   reviewStatus: "전체",
   errorType: "전체",
@@ -57,6 +60,257 @@ const DEFAULT_REVIEW_TARGET = {
   subjectEndIndex: "1",
   questionRange: "",
   targetScope: "filtered",
+};
+
+
+const DEFAULT_REVIEW_CHECKS = {
+  content: {
+    problem_validity: true,
+    answer_validation: true,
+    explanation_logic: true,
+    choice_explanation_match: true,
+    image_validation: true,
+    expression_error: true,
+    keyword_validation: true,
+  },
+  format: {
+    start_sentence: true,
+    choice_explanation_exists: true,
+    choice_explanation_format: true,
+    honorific_style: true,
+    negative_question: true,
+    conclusion_sentence: true,
+    quote_rules: true,
+    duplicate_answer_sentence: true,
+    markdown_error: true,
+    long_explanation_manual_check: true,
+  },
+};
+
+const EMPTY_REVIEW_CHECKS = {
+  content: {
+    problem_validity: false,
+    answer_validation: false,
+    explanation_logic: false,
+    choice_explanation_match: false,
+    image_validation: false,
+    expression_error: false,
+    keyword_validation: false,
+  },
+  format: {
+    start_sentence: false,
+    choice_explanation_exists: false,
+    choice_explanation_format: false,
+    honorific_style: false,
+    negative_question: false,
+    conclusion_sentence: false,
+    quote_rules: false,
+    duplicate_answer_sentence: false,
+    markdown_error: false,
+    long_explanation_manual_check: false,
+  },
+};
+
+const REVIEW_CHECK_PRESETS = {
+  all: {
+    label: "전체 검수",
+    checks: DEFAULT_REVIEW_CHECKS,
+  },
+  contentOnly: {
+    label: "내용만",
+    checks: {
+      content: {
+        problem_validity: true,
+        answer_validation: true,
+        explanation_logic: true,
+        choice_explanation_match: true,
+        image_validation: true,
+        expression_error: true,
+        keyword_validation: true,
+      },
+      format: {
+        start_sentence: false,
+        choice_explanation_exists: false,
+        choice_explanation_format: false,
+        honorific_style: false,
+        negative_question: false,
+        conclusion_sentence: false,
+        quote_rules: false,
+        duplicate_answer_sentence: false,
+        // 표현/렌더링 오류 버튼에 포함된 Markdown 잔여 문법 검수입니다.
+        // 화면에서는 내용 검수 쪽 버튼으로 보이지만, API payload는 기존 format.markdown_error 키를 유지합니다.
+        markdown_error: true,
+        long_explanation_manual_check: false,
+      },
+    },
+  },
+  formatOnly: {
+    label: "형식만",
+    checks: {
+      content: {
+        problem_validity: false,
+        answer_validation: false,
+        explanation_logic: false,
+        choice_explanation_match: false,
+        image_validation: false,
+        expression_error: false,
+        keyword_validation: false,
+      },
+      format: {
+        start_sentence: true,
+        choice_explanation_exists: true,
+        choice_explanation_format: true,
+        honorific_style: true,
+        negative_question: true,
+        conclusion_sentence: true,
+        quote_rules: true,
+        duplicate_answer_sentence: true,
+        markdown_error: true,
+        long_explanation_manual_check: true,
+      },
+    },
+  },
+  answerOnly: {
+    label: "정답만",
+    checks: {
+      content: {
+        problem_validity: false,
+        answer_validation: true,
+        explanation_logic: false,
+        choice_explanation_match: false,
+        image_validation: false,
+        expression_error: false,
+        keyword_validation: false,
+      },
+      format: {
+        start_sentence: false,
+        choice_explanation_exists: false,
+        choice_explanation_format: false,
+        honorific_style: false,
+        negative_question: false,
+        conclusion_sentence: false,
+        quote_rules: false,
+        duplicate_answer_sentence: false,
+        markdown_error: false,
+        long_explanation_manual_check: false,
+      },
+    },
+  },
+  explanationOnly: {
+    label: "해설만",
+    checks: {
+      content: {
+        problem_validity: false,
+        answer_validation: false,
+        explanation_logic: true,
+        choice_explanation_match: true,
+        image_validation: false,
+        expression_error: true,
+        keyword_validation: false,
+      },
+      format: {
+        start_sentence: true,
+        choice_explanation_exists: true,
+        choice_explanation_format: true,
+        honorific_style: true,
+        negative_question: true,
+        conclusion_sentence: true,
+        quote_rules: true,
+        duplicate_answer_sentence: true,
+        markdown_error: true,
+        long_explanation_manual_check: true,
+      },
+    },
+  },
+  cancel: {
+    label: "취소",
+    checks: EMPTY_REVIEW_CHECKS,
+  },
+};
+
+const REVIEW_CHECK_GROUPS = {
+  content: {
+    problem_material: {
+      label: "문제 성립/자료 검수",
+      keys: ["problem_validity", "image_validation"],
+      description: "문제 풀이에 필요한 본문, 보기, 이미지, 표, SQL, 수식 등이 충분한지 확인합니다.",
+    },
+    answer_validation: {
+      label: "정답 검증",
+      keys: ["answer_validation"],
+      description: "문제 조건을 기준으로 실제 정답과 answer 값이 일치하는지 확인합니다.",
+    },
+    explanation_content: {
+      label: "해설 내용 검수",
+      keys: ["explanation_logic", "choice_explanation_match"],
+      description: "해설 논리와 선지/보기 해설이 문제 조건과 맞는지 확인합니다.",
+    },
+    expression_rendering: {
+      label: "표현/렌더링 오류",
+      keys: ["expression_error"],
+      description: "수식, 특수문자, 글리프, Markdown 잔여 문법 등 표시 문제를 확인합니다.",
+    },
+    keyword_validation: {
+      label: "키워드 검수",
+      keys: ["keyword_validation"],
+      description: "키워드가 문제의 핵심 개념과 맞는지, 누락되었거나 과도하게 넓지 않은지 확인합니다.",
+    },
+  },
+
+  format: {
+    answer_sentence_format: {
+      label: "정답 문장 형식",
+      keys: [
+        "start_sentence",
+        "conclusion_sentence",
+        "duplicate_answer_sentence",
+        "quote_rules",
+        "negative_question",
+      ],
+      description: "해설 시작 문장, 결론 문장, 정답 문장 중복, 따옴표 예외, 부정형 예외를 확인합니다.",
+    },
+    choice_view_explanation_structure: {
+      label: "선지/보기 해설 구조",
+      keys: [
+        "choice_explanation_exists",
+        "choice_explanation_format",
+      ],
+      description: "일반 문제는 선지별 해설 구조를 확인하고, ㄱ/ㄴ/ㄷ/ㄹ 보기제시형은 보기별 해설이 있으면 정상으로 인정합니다.",
+    },
+    honorific_style: {
+      label: "존댓말 확인",
+      keys: ["honorific_style"],
+      description: "해설이 학습자에게 노출하기에 자연스러운 존댓말인지 확인합니다.",
+    },
+    long_explanation_manual_check: {
+      label: "긴 해설 수동 검토",
+      keys: ["long_explanation_manual_check"],
+      description: "해설이 너무 길어 스크린샷 검증이 제한된 경우 형식 검수 항목으로 표시합니다.",
+    },
+  },
+};
+
+const REVIEW_CONTENT_CHECK_DESCRIPTIONS = {
+  problem_validity: "필수 정보, 이미지, 표, SQL, 수식 누락 등으로 문제가 풀 수 있는 상태인지 확인합니다.",
+  answer_validation: "문제 조건을 기준으로 실제 정답과 answer 값이 일치하는지 확인합니다.",
+  explanation_logic: "해설이 문제 조건과 핵심 개념을 올바르게 설명하는지 확인합니다.",
+  choice_explanation_match: "일반 문제는 선지별 해설을 비교하고, ㄱ/ㄴ/ㄷ/ㄹ 보기제시형은 보기별 해설이 있으면 정상으로 인정합니다.",
+  image_validation: "문제/선지/해설 이미지가 깨지거나 누락되어 풀이에 지장이 있는지 확인합니다.",
+  expression_error: "수식, 특수문자, 글리프, Markdown 잔여 문법 등 표시 깨짐을 확인합니다.",
+  keyword_validation: "키워드가 문제의 핵심 개념과 일치하는지, 핵심 키워드가 누락되었거나 지나치게 넓은지 확인합니다.",
+};
+
+const REVIEW_FORMAT_CHECK_DESCRIPTIONS = {
+  start_sentence: "해설 첫 문장이 '정답은 X번입니다.' 형식인지 확인합니다.",
+  choice_explanation_exists: "일반 문제는 각 선지 해설 존재 여부를 확인하고, 보기제시형은 ㄱ/ㄴ/ㄷ/ㄹ 보기별 해설이 있으면 정상으로 인정합니다.",
+  choice_explanation_format: "일반 문제는 'X. 선지 내용' 다음 줄 ': 설명' 구조를 확인하고, 보기제시형은 보기별 해설 형식을 허용합니다.",
+  honorific_style: "해설이 학습자에게 노출하기에 자연스러운 존댓말인지 확인합니다. 단순한 '~다' 포함만으로 오류 처리하지 않습니다.",
+  negative_question: "틀린 것/옳지 않은 것 문제에서 정답 선지를 부적절한 설명으로 해설하는 정상 케이스를 예외 처리합니다.",
+  conclusion_sentence: "마지막 결론 문장이 정답 선지와 함께 적절한 형식으로 있는지 확인합니다.",
+  quote_rules: "SQL 문자열이나 선지 원문 때문에 따옴표가 중첩된 정상 케이스를 오류로 보지 않게 합니다.",
+  duplicate_answer_sentence: "해설 시작 외 위치에 '정답은 X번입니다.' 문장이 반복되는지 확인합니다.",
+  markdown_error: "사용자 노출 해설에 백틱(`) 또는 Markdown 굵게 표시(**)가 남았는지 확인합니다.",
+  long_explanation_manual_check: "해설이 너무 길어 스크린샷 검증이 제한된 경우 수동 검토 항목으로 표시합니다.",
 };
 
 const DEFAULT_TARGET_MAP_FORM = {
@@ -119,6 +373,233 @@ function uniqueJoin(values) {
   return Array.from(new Set(values.filter(Boolean))).join(", ");
 }
 
+
+function cloneReviewChecks(checks) {
+  return JSON.parse(JSON.stringify(checks));
+}
+
+function getReviewGroupCheckItems(group, groupKey) {
+  const item = REVIEW_CHECK_GROUPS[group]?.[groupKey];
+  if (!item) return [];
+
+  if (Array.isArray(item.checkItems)) {
+    return item.checkItems;
+  }
+
+  return (item.keys || []).map((key) => ({ group, key }));
+}
+
+function countSelectedReviewChecks(checks) {
+  return Object.entries(REVIEW_CHECK_GROUPS).reduce((total, [group, groupItems]) => {
+    return total + Object.keys(groupItems).filter((groupKey) => {
+      const checkItems = getReviewGroupCheckItems(group, groupKey);
+      return checkItems.every(({ group: itemGroup, key }) => !!checks[itemGroup]?.[key]);
+    }).length;
+  }, 0);
+}
+
+function isReviewGroupChecked(reviewChecks, group, groupKey) {
+  const checkItems = getReviewGroupCheckItems(group, groupKey);
+  return checkItems.every(({ group: itemGroup, key }) => !!reviewChecks[itemGroup]?.[key]);
+}
+
+function getSelectedReviewCheckLabels(checks) {
+  return Object.entries(REVIEW_CHECK_GROUPS).flatMap(([group, groupItems]) =>
+    Object.entries(groupItems)
+      .filter(([groupKey]) => isReviewGroupChecked(checks, group, groupKey))
+      .map(([, item]) => item.label)
+  );
+}
+
+function formatSelectedReviewCheckLabels(labels) {
+  return labels.length > 0 ? labels.join(", ") : "-";
+}
+
+function parseJsonArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseLabelList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+  return String(value)
+    .split(/[,|\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function uniqueLabels(labels) {
+  return Array.from(new Set((labels || []).map(String).map((item) => item.trim()).filter(Boolean)));
+}
+
+function getAllReviewLabelGroups() {
+  const content = Object.values(REVIEW_CHECK_GROUPS.content).map((item) => item.label);
+  const format = Object.values(REVIEW_CHECK_GROUPS.format).map((item) => item.label);
+  return { content, format, all: [...content, ...format] };
+}
+
+function makeReviewScopeSummary(labels) {
+  const normalized = uniqueLabels(labels);
+  if (normalized.length === 0) return "-";
+
+  const { content, format, all } = getAllReviewLabelGroups();
+  const hasAllContent = content.every((label) => normalized.includes(label));
+  const hasAllFormat = format.every((label) => normalized.includes(label));
+  const hasAll = all.every((label) => normalized.includes(label));
+
+  if (hasAll) return "전체 검수";
+
+  const remainingContent = content.filter((label) => normalized.includes(label));
+  const remainingFormat = format.filter((label) => normalized.includes(label));
+
+  if (hasAllContent && remainingFormat.length === 0) return "내용 검수";
+  if (hasAllFormat && remainingContent.length === 0) return "형식 검수";
+
+  if (hasAllContent) {
+    return ["내용 검수", ...remainingFormat].join(", ");
+  }
+
+  if (hasAllFormat) {
+    return [...remainingContent, "형식 검수"].join(", ");
+  }
+
+  return normalized.join(", ");
+}
+
+function makeReviewRunTitle(labels) {
+  return makeReviewScopeSummary(labels);
+}
+
+function mergeTextBlock(existingText, title, body) {
+  const current = String(existingText || "").trim();
+  const nextBody = String(body || "").trim();
+  if (!nextBody) return current;
+
+  const block = `[${title}]\n${nextBody}`;
+  return current ? `${current}\n\n${block}` : block;
+}
+
+function formatIssuesForHistory(issues) {
+  return (issues || []).map((issue) => ({
+    issue_type: issue.issue_type || "",
+    reason: issue.reason || "",
+    suggestion: issue.suggestion || "",
+  }));
+}
+
+function normalizeReviewHistory(history) {
+  return parseJsonArray(history).map((item, index) => {
+    const labels = uniqueLabels(item.labels || []);
+    const issues = formatIssuesForHistory(item.issues || []);
+    const summary = item.summary || makeReviewScopeSummary(labels);
+
+    return {
+      ...item,
+      at: item.at || `history-${index}`,
+      labels,
+      summary,
+      issues,
+      issue_count: issues.length,
+      result: issues.length > 0 ? "오류있음" : "정상",
+    };
+  });
+}
+
+function rebuildReviewFieldsFromHistory(history) {
+  const normalizedHistory = normalizeReviewHistory(history);
+  const allIssues = normalizedHistory.flatMap((item) => item.issues || []);
+
+  const errorTypes = normalizeErrorTypes(
+    allIssues
+      .map((issue) => issue.issue_type)
+      .filter(Boolean)
+  );
+
+  const reviewCheckLabels = uniqueLabels(
+    normalizedHistory.flatMap((item) => item.labels || [])
+  );
+
+  const reason = normalizedHistory
+    .map((item) => {
+      const body = (item.issues || [])
+        .map((issue) => issue.reason || "")
+        .filter(Boolean)
+        .join("\n\n");
+
+      return body ? `[${item.summary || "-"}]\n${body}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  const suggestion = normalizedHistory
+    .map((item) => {
+      const body = (item.issues || [])
+        .map((issue) => issue.suggestion || "")
+        .filter(Boolean)
+        .join("\n\n");
+
+      return body ? `[${item.summary || "-"}]\n${body}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  const nextStatus = errorTypes.length > 0 ? "오류있음" : "정상";
+
+  return {
+    review_check_history: normalizedHistory,
+    review_check_labels: reviewCheckLabels,
+    review_scope_summary: makeReviewScopeSummary(reviewCheckLabels),
+    error_types: errorTypes,
+    error_type: errorTypes.join(", "),
+    reason,
+    suggestion,
+    status: nextStatus,
+    review_status: nextStatus,
+  };
+}
+
+function toggleReviewGroup(setReviewChecks, group, groupKey) {
+  const checkItems = getReviewGroupCheckItems(group, groupKey);
+
+  setReviewChecks((prev) => {
+    const currentlyChecked = checkItems.every(
+      ({ group: itemGroup, key }) => !!prev[itemGroup]?.[key]
+    );
+
+    const next = {
+      ...prev,
+      content: { ...prev.content },
+      format: { ...prev.format },
+    };
+
+    checkItems.forEach(({ group: itemGroup, key }) => {
+      if (!next[itemGroup]) next[itemGroup] = {};
+      next[itemGroup][key] = !currentlyChecked;
+    });
+
+    return next;
+  });
+}
+
+function normalizeReviewChecksForPayload(checks) {
+  const next = cloneReviewChecks(checks);
+
+  // 화면에는 "표현/렌더링 오류" 1개 항목만 보이게 하고,
+  // 실제 AI 검수 payload에서는 기존 호환용 markdown_error를 같은 값으로 맞춥니다.
+  if (!next.format) next.format = {};
+  next.format.markdown_error = !!next.content?.expression_error;
+
+  return next;
+}
+
 function parseReviewRange(rangeText) {
   const text = String(rangeText ?? "").trim();
   if (!text || text === "all") return null;
@@ -151,6 +632,29 @@ function makeOptions(rows, key, shouldSort = false) {
   return ["전체", ...sortedValues];
 }
 
+function makeErrorTypeOptions(rows) {
+  const values = rows.flatMap((row) =>
+    normalizeErrorTypes(splitErrorTypes(row.errorType))
+  );
+
+  const uniqueValues = Array.from(
+    new Set(
+      values
+        .map((item) => String(item || "").trim())
+        .filter((item) => item && item !== "-")
+    )
+  );
+
+  const sortedValues = uniqueValues.sort((a, b) =>
+    a.localeCompare(b, "ko-KR", {
+      numeric: true,
+      sensitivity: "base",
+    })
+  );
+
+  return ["전체", ...sortedValues];
+}
+
 function makeSubjectOptions(rows) {
   const values = rows
     .map((row) => String(row.subjectName || "").trim() || "미지정")
@@ -169,6 +673,21 @@ function makeSubjectOptions(rows) {
 function makeCourseOptions(rows) {
   const values = rows
     .map((row) => String(row.courseName || "").trim() || "미지정")
+    .filter(Boolean);
+
+  const sortedValues = Array.from(new Set(values)).sort((a, b) =>
+    a.localeCompare(b, "ko-KR", {
+      numeric: true,
+      sensitivity: "base",
+    })
+  );
+
+  return ["전체", ...sortedValues];
+}
+
+function makeTextOptions(rows, key) {
+  const values = rows
+    .map((row) => String(row[key] || "").trim() || "미지정")
     .filter(Boolean);
 
   const sortedValues = Array.from(new Set(values)).sort((a, b) =>
@@ -215,14 +734,37 @@ function getReflectClass(status) {
 function splitErrorTypes(value) {
   const text = String(value ?? "").trim();
   if (!text || text === "-" || text === "없음") return [];
-  return text.split(/[,/|·\n]/).map((item) => item.trim()).filter(Boolean);
+
+  return text
+    .split(/[,|·\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function normalizeErrorTypes(types) {
+  const rawTypes = (types || [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+
+  const hasBrokenExpressionRendering =
+    rawTypes.includes("표현") && rawTypes.includes("렌더링 오류");
+
   const result = [];
 
-  for (const type of types || []) {
-    if (!type) continue;
+  for (const type of rawTypes) {
+    if (hasBrokenExpressionRendering && (type === "표현" || type === "렌더링 오류")) {
+      if (!result.includes("표현/렌더링 오류")) {
+        result.push("표현/렌더링 오류");
+      }
+      continue;
+    }
+
+    if (type === "표현" || type === "렌더링 오류") {
+      if (!result.includes("표현/렌더링 오류")) {
+        result.push("표현/렌더링 오류");
+      }
+      continue;
+    }
 
     if (type === "긴 해설 수동 검토 필요") {
       result.push(type);
@@ -298,17 +840,10 @@ function mapQuestion(item, index) {
     ],
     ""
   );
-  const subjectName = pick(
-    merged,
-    [
-      "subject_name",
-      "subjectName",
-      "과목명",
-      "과목",
-      "subject",
-    ],
-    ""
-  );
+  // 과목은 raw_json의 "subject/과목" 값으로 보완하지 않습니다.
+  // 문제 엑셀의 subject/과목에는 강좌명이나 1과목/2과목 같은 값이 들어갈 수 있어서,
+  // 백엔드가 CD 매핑으로 만든 subject_name만 화면에 표시합니다.
+  const subjectName = pick(item, ["subject_name", "subjectName"], "");
 
   const courseName = pick(
     merged,
@@ -321,13 +856,43 @@ function mapQuestion(item, index) {
     ""
   );
 
+  const setName = pick(
+    merged,
+    [
+      "set_name",
+      "setName",
+      "세트명",
+      "set",
+    ],
+    ""
+  );
+
+  const subtypeName = pick(
+    merged,
+    [
+      "subtype_name",
+      "subtypeName",
+      "하위유형",
+      "sub_title",
+      "subTitle",
+      "subtype",
+    ],
+    ""
+  );
+
   return {
     rowKey: `${id}-${index}`,
     id: toText(id),
     courseName: toText(courseName, ""),
+    setName: toText(setName, ""),
     examUniqueNo: toText(examUniqueNo, ""),
     subjectName: toText(subjectName, ""),
+    subtypeName: toText(subtypeName, ""),
     cdValue: toText(cdValue, ""),
+    uploadFile: toText(pick(item, ["upload_file", "uploaded_file", "uploadFile", "file_name", "filename", "source_file", "업로드파일", "업로드 파일"], ""), ""),
+    chapter: toText(pick(item, ["chapter", "chapter_name", "chapterName"], ""), ""),
+    section: toText(pick(item, ["section", "section_name", "sectionName"], ""), ""),
+    learningGoal: toText(pick(item, ["learning_goal", "learningGoal"], ""), ""),
     number: toText(pick(merged, ["number", "question_no", "q_no", "no", "번호", "문제번호", "문제 번호"]), "-"),
     question: toText(pick(merged, ["question", "question_text", "content", "stem", "title", "문제"]), "-"),
     viewText: toText(pick(merged, ["view_text", "view", "보기", "보기텍스트"], ""), ""),
@@ -335,11 +900,14 @@ function mapQuestion(item, index) {
     reviewStatus: toText(pick(merged, ["review_status", "status", "검수상태"]), "미검수"),
     statusMemo: toText(pick(merged, ["status_memo", "review_memo", "status_detail", "result_detail"], ""), ""),
     errorType: toText(pick(merged, ["error_type", "issue_type", "errorType", "오류유형"]), "-"),
-    reason: toText(pick(merged, ["reason", "etc_reason", "other_reason", "기타사유"], "-"), "-"),
+    reason: toText(pick(merged, ["reason", "etc_reason", "other_reason", "기타사유", "오류사유"], "-"), "-"),
     suggestion: toText(pick(merged, ["suggestion", "review_suggestion", "수정제안", "수정 제안"], ""), ""),
     reviewer: toText(pick(merged, ["reviewer", "inspector", "검수자"]), "admin"),
     reviewedAt: toText(pick(merged, ["reviewed_at", "review_date", "checked_at", "검수일"]), "-"),
     reflectStatus: toText(pick(merged, ["reflect_status", "reflection_status", "apply_status", "반영상태"]), "미반영"),
+    reviewCheckLabels: parseLabelList(pick(merged, ["review_check_labels", "reviewCheckLabels", "검수항목"], "")),
+    reviewScopeSummary: toText(pick(merged, ["review_scope_summary", "reviewScopeSummary", "검수범위"], ""), ""),
+    reviewCheckHistory: parseJsonArray(pick(merged, ["review_check_history", "reviewCheckHistory"], "")),
     raw: merged,
   };
 }
@@ -350,7 +918,8 @@ function App() {
   const [targetMaps, setTargetMaps] = useState([]);
   const [reviewQuestion, setReviewQuestion] = useState(null);
   const [editForm, setEditForm] = useState(null);
-  const fileInputRef = useRef(null);
+  const questionFileInputRef = useRef(null);
+  const cdMetaFileInputRef = useRef(null);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [currentPage, setCurrentPage] = useState(1);
   const [reviewCurrentPage, setReviewCurrentPage] = useState(1);
@@ -362,6 +931,8 @@ function App() {
   const [reviewRunning, setReviewRunning] = useState(false);
   const [cancelingReview, setCancelingReview] = useState(false);
   const [reviewJobInfo, setReviewJobInfo] = useState(null);
+  const [reviewChecks, setReviewChecks] = useState(() => cloneReviewChecks(DEFAULT_REVIEW_CHECKS));
+  const [activeReviewPreset, setActiveReviewPreset] = useState("all");
   const [selectedRows, setSelectedRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -376,6 +947,10 @@ function App() {
       const items = Array.isArray(json) ? json : json.items || json.data || json.results || [];
       setQuestions(items);
       setSelectedRows([]);
+      setReviewTarget((prev) => ({
+        ...prev,
+        targetScope: "filtered",
+      }));
     } catch (error) {
       console.error(error);
       setLoadError("문제 데이터를 불러오지 못했습니다. backend 서버 실행 여부를 확인하세요.");
@@ -403,7 +978,31 @@ function App() {
     fetchTargetMaps();
   }, []);
 
-  const handleExcelUpload = async (event) => {
+  const toggleReviewCheck = (group, key) => {
+    setActiveReviewPreset("");
+
+    setReviewChecks((prev) => ({
+      ...prev,
+      [group]: {
+        ...prev[group],
+        [key]: !prev[group][key],
+      },
+    }));
+  };
+
+  const applyReviewCheckPreset = (presetKey) => {
+    const preset = REVIEW_CHECK_PRESETS[presetKey];
+    if (!preset) return;
+
+    setReviewChecks(cloneReviewChecks(preset.checks));
+    setActiveReviewPreset(presetKey);
+  };
+
+  const selectedReviewCheckCount = countSelectedReviewChecks(reviewChecks);
+  const selectedReviewCheckLabels = getSelectedReviewCheckLabels(reviewChecks);
+  const selectedReviewCheckText = formatSelectedReviewCheckLabels(selectedReviewCheckLabels);
+
+  const handleQuestionExcelUpload = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -477,14 +1076,82 @@ function App() {
     }
   };
 
+  const handleCdMetaExcelUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/cd-meta/upload-excel`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const text = await res.text();
+      let result = {};
+
+      try {
+        result = text ? JSON.parse(text) : {};
+      } catch {
+        result = { raw: text };
+      }
+
+      if (!res.ok) {
+        throw new Error(result.detail || result.message || text || "CD 매핑 엑셀 업로드 실패");
+      }
+
+      await fetchQuestions();
+
+      const cdMetaCount = result.cd_meta_upserted ?? 0;
+      const updatedQuestionCount = result.questions_updated ?? 0;
+      const skippedSheets = result.skipped_sheets || [];
+
+      if (cdMetaCount === 0) {
+        alert(
+          [
+            "CD 매핑 엑셀 파일은 읽었지만 저장된 데이터가 없습니다.",
+            "",
+            `CD 매핑 저장/갱신: ${cdMetaCount}건`,
+            `기존 문제 반영: ${updatedQuestionCount}건`,
+            `건너뛴 시트: ${skippedSheets.length ? skippedSheets.join(", ") : "없음"}`,
+            "",
+            "엑셀에 CD값, 과목, 장, 절, 학습목표 컬럼이 있는지 확인해 주세요.",
+          ].join("\n")
+        );
+        return;
+      }
+
+      alert(
+        [
+          "CD 매핑 엑셀 데이터를 DB에 업로드했습니다.",
+          "",
+          `CD 매핑 저장/갱신: ${cdMetaCount}건`,
+          `기존 문제 반영: ${updatedQuestionCount}건`,
+          skippedSheets.length ? `건너뛴 시트: ${skippedSheets.join(", ")}` : "",
+        ].filter(Boolean).join("\n")
+      );
+    } catch (error) {
+      console.error(error);
+      alert(`CD 매핑 엑셀 업로드 중 오류가 발생했습니다.\n${error.message}`);
+    } finally {
+      event.target.value = "";
+    }
+  };
+
   const rows = useMemo(() => {
     const subjectByExamUniqueNo = new Map();
     const courseByExamUniqueNo = new Map();
+    const setByExamUniqueNo = new Map();
+    const subtypeByExamUniqueNo = new Map();
 
     targetMaps.forEach((item) => {
       const examUniqueNo = String(item.exam_unique_no || "").trim();
       const subjectName = String(item.subject_name || "").trim();
       const courseName = String(item.course_name || "").trim();
+      const setName = String(item.set_name || "").trim();
+      const subtypeName = String(item.subtype_name || "").trim();
 
       if (examUniqueNo && subjectName && !subjectByExamUniqueNo.has(examUniqueNo)) {
         subjectByExamUniqueNo.set(examUniqueNo, subjectName);
@@ -493,21 +1160,38 @@ function App() {
       if (examUniqueNo && courseName && !courseByExamUniqueNo.has(examUniqueNo)) {
         courseByExamUniqueNo.set(examUniqueNo, courseName);
       }
+
+      if (examUniqueNo && setName && !setByExamUniqueNo.has(examUniqueNo)) {
+        setByExamUniqueNo.set(examUniqueNo, setName);
+      }
+
+      if (examUniqueNo && subtypeName && !subtypeByExamUniqueNo.has(examUniqueNo)) {
+        subtypeByExamUniqueNo.set(examUniqueNo, subtypeName);
+      }
     });
 
     return questions
       .map((item, index) => {
         const row = mapQuestion(item, index);
+        const examUniqueNo = String(row.examUniqueNo || "").trim();
 
         return {
           ...row,
           courseName:
             row.courseName ||
-            courseByExamUniqueNo.get(String(row.examUniqueNo || "").trim()) ||
+            courseByExamUniqueNo.get(examUniqueNo) ||
+            "",
+          setName:
+            row.setName ||
+            setByExamUniqueNo.get(examUniqueNo) ||
             "",
           subjectName:
             row.subjectName ||
-            subjectByExamUniqueNo.get(String(row.examUniqueNo || "").trim()) ||
+            subjectByExamUniqueNo.get(examUniqueNo) ||
+            "",
+          subtypeName:
+            row.subtypeName ||
+            subtypeByExamUniqueNo.get(examUniqueNo) ||
             "",
         };
       })
@@ -547,11 +1231,13 @@ function App() {
 
   const options = useMemo(() => ({
     courseName: makeCourseOptions(rows),
+    setName: makeTextOptions(rows, "setName"),
     examUniqueNo: makeOptions(rows, "examUniqueNo"),
     subjectName: makeSubjectOptions(rows),
+    subtypeName: makeTextOptions(rows, "subtypeName"),
     cdValue: makeOptions(rows, "cdValue", true),
     reviewStatus: makeOptions(rows, "reviewStatus"),
-    errorType: makeOptions(rows, "errorType"),
+    errorType: makeErrorTypeOptions(rows),
     reflectStatus: makeOptions(rows, "reflectStatus"),
   }), [rows]);
 
@@ -562,14 +1248,22 @@ function App() {
       const targetText = lower([
         row.id,
         row.courseName,
+        row.setName,
         row.examUniqueNo,
         String(row.subjectName || "").trim() || "미지정",
+        row.subtypeName,
         row.cdValue,
+        row.uploadFile,
+        row.chapter,
+        row.section,
+        row.learningGoal,
         row.number,
         row.question,
         row.viewText,
         row.answer,
         row.reviewStatus,
+        row.reviewScopeSummary,
+        formatSelectedReviewCheckLabels(row.reviewCheckLabels || []),
         row.errorType,
         row.reason,
         row.reviewer,
@@ -582,13 +1276,32 @@ function App() {
       const matchSubjectName = filters.subjectName === "전체" || rowSubjectName === filters.subjectName;
       const rowCourseName = String(row.courseName || "").trim() || "미지정";
       const matchCourseName = filters.courseName === "전체" || rowCourseName === filters.courseName;
+      const rowSetName = String(row.setName || "").trim() || "미지정";
+      const matchSetName = filters.setName === "전체" || rowSetName === filters.setName;
+      const rowSubtypeName = String(row.subtypeName || "").trim() || "미지정";
+      const matchSubtypeName = filters.subtypeName === "전체" || rowSubtypeName === filters.subtypeName;
       const matchCdValue = filters.cdValue === "전체" || row.cdValue === filters.cdValue;
       const matchReviewStatus = filters.reviewStatus === "전체" || row.reviewStatus === filters.reviewStatus;
-      const matchErrorType = filters.errorType === "전체" || row.errorType === filters.errorType;
+
+      const rowErrorTypes = normalizeErrorTypes(splitErrorTypes(row.errorType));
+
+      const matchErrorType =
+        filters.errorType === "전체" ||
+        rowErrorTypes.includes(filters.errorType);
+
       const matchReflectStatus = filters.reflectStatus === "전체" || row.reflectStatus === filters.reflectStatus;
       const matchKeyword = !keyword || targetText.includes(keyword);
 
-      return matchCourseName && matchExamUniqueNo && matchSubjectName && matchCdValue && matchReviewStatus && matchErrorType && matchReflectStatus && matchKeyword;  
+      return matchCourseName &&
+        matchSetName &&
+        matchExamUniqueNo &&
+        matchSubjectName &&
+        matchSubtypeName &&
+        matchCdValue &&
+        matchReviewStatus &&
+        matchErrorType &&
+        matchReflectStatus &&
+        matchKeyword;
     });
   }, [rows, filters]);
 
@@ -634,15 +1347,40 @@ function App() {
   };
 
   const toggleAll = (checked, visibleRows) => {
+    setReviewCurrentPage(1);
+
     if (checked) {
-      setSelectedRows(visibleRows.map((row) => row.rowKey));
+      const next = visibleRows.map((row) => row.rowKey);
+      setSelectedRows(next);
+      setReviewTarget((prev) => ({
+        ...prev,
+        targetScope: next.length > 0 ? "selected" : "filtered",
+      }));
       return;
     }
+
     setSelectedRows([]);
+    setReviewTarget((prev) => ({
+      ...prev,
+      targetScope: "filtered",
+    }));
   };
 
   const toggleRow = (rowKey) => {
-    setSelectedRows((prev) => prev.includes(rowKey) ? prev.filter((key) => key !== rowKey) : [...prev, rowKey]);
+    setReviewCurrentPage(1);
+
+    setSelectedRows((prev) => {
+      const next = prev.includes(rowKey)
+        ? prev.filter((key) => key !== rowKey)
+        : [...prev, rowKey];
+
+      setReviewTarget((targetPrev) => ({
+        ...targetPrev,
+        targetScope: next.length > 0 ? "selected" : "filtered",
+      }));
+
+      return next;
+    });
   };
 
   const handleBulkAction = async (action) => {
@@ -1068,7 +1806,7 @@ const targetSubtypeOptions = useMemo(() => {
     });
   };
 
-  const reviewTargetRows = getReviewRows(reviewTarget.targetScope);
+  const reviewTargetRows = getReviewRows("filtered");
   const REVIEW_TARGET_PAGE_SIZE = 20;
 
   const reviewTargetTotalPages = useMemo(() => {
@@ -1140,10 +1878,13 @@ const targetSubtypeOptions = useMemo(() => {
       course_name: String(reviewTarget.courseName || "").trim(),
       review_mode: "batch",
       targets: configs,
+      review_checks: normalizeReviewChecksForPayload(reviewChecks),
+      checks: normalizeReviewChecksForPayload(reviewChecks),
       options: {
         headless: true,
         write_excel: true,
         include_raw_data: true,
+        review_checks: normalizeReviewChecksForPayload(reviewChecks),
       },
     };
   };
@@ -1171,41 +1912,88 @@ const targetSubtypeOptions = useMemo(() => {
     return targetRows;
   };
 
-  const applyAiReviewResult = async (result) => {
+  const applyAiReviewResult = async (result, reviewMeta = {}) => {
     const items = result?.items || [];
+    const currentRowsById = new Map(rows.map((row) => [String(row.id), row]));
+    const runLabels = uniqueLabels(reviewMeta.labels || selectedReviewCheckLabels);
+    const runSummary = reviewMeta.summary || makeReviewRunTitle(runLabels);
+    const runAt = new Date().toISOString();
 
     for (const item of items) {
       const siteQuestionId = item.site_question_id;
       if (!siteQuestionId) continue;
 
+      const currentRow = currentRowsById.get(String(siteQuestionId));
+      const currentRaw = currentRow?.raw || {};
+      const previousErrorTypes = splitErrorTypes(
+        currentRow?.errorType && currentRow.errorType !== "-"
+          ? currentRow.errorType
+          : getValue(currentRaw, ["error_type", "issue_type", "errorType", "오류유형"], "")
+      );
+
+      const previousReason = currentRow?.reason && currentRow.reason !== "-"
+        ? currentRow.reason
+        : getValue(currentRaw, ["reason", "기타사유", "오류사유"], "");
+
+      const previousSuggestion = currentRow?.suggestion || getValue(currentRaw, ["suggestion", "수정제안", "수정 제안"], "");
+      const previousLabels = uniqueLabels(currentRow?.reviewCheckLabels || parseLabelList(currentRaw.review_check_labels));
+      const previousHistory = parseJsonArray(currentRaw.review_check_history);
+
       const issues = item.issues || [];
       const hasIssue = item.review_status === "issue_found" || issues.length > 0;
-      const errorType = hasIssue
-        ? normalizeErrorTypes(issues.map((issue) => issue.issue_type)).join(", ")
-        : "";
+      const newErrorTypes = hasIssue
+        ? normalizeErrorTypes(issues.map((issue) => issue.issue_type)).filter(Boolean)
+        : [];
 
-      const reason = hasIssue
+      const errorTypeList = normalizeErrorTypes([...previousErrorTypes, ...newErrorTypes]);
+      const reviewCheckLabels = uniqueLabels([...previousLabels, ...runLabels]);
+      const reviewScopeSummary = makeReviewScopeSummary(reviewCheckLabels);
+
+      const issueReason = hasIssue
         ? issues
             .map((issue) => issue.reason || "")
             .filter(Boolean)
             .join("\n\n")
         : "";
 
-      const suggestion = hasIssue
+      const issueSuggestion = hasIssue
         ? issues
             .map((issue) => issue.suggestion || "")
             .filter(Boolean)
             .join("\n\n")
         : "";
 
+      const nextReason = hasIssue
+        ? mergeTextBlock(previousReason, runSummary, issueReason)
+        : previousReason;
+
+      const nextSuggestion = hasIssue
+        ? mergeTextBlock(previousSuggestion, runSummary, issueSuggestion)
+        : previousSuggestion;
+
+      const historyEntry = {
+        at: runAt,
+        summary: runSummary,
+        labels: runLabels,
+        result: hasIssue ? "오류있음" : "정상",
+        issue_count: issues.length,
+        issues: formatIssuesForHistory(issues, runAt, runSummary),
+      };
+
+      const reviewCheckHistory = [...previousHistory, historyEntry].slice(-50);
+      const hasAnyIssue = errorTypeList.length > 0 || String(nextReason || "").trim() !== "";
+
       const res = await fetch(`${API_BASE}/api/questions/${siteQuestionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          review_status: hasIssue ? "오류있음" : "정상",
-          error_type: errorType,
-          reason,
-          suggestion,
+          review_status: hasAnyIssue ? "오류있음" : "정상",
+          error_type: errorTypeList.join(", "),
+          reason: nextReason,
+          suggestion: nextSuggestion,
+          review_check_labels: reviewCheckLabels.join(", "),
+          review_scope_summary: reviewScopeSummary,
+          review_check_history: JSON.stringify(reviewCheckHistory),
           reviewer: "AI검수",
           reflect_status: "미반영",
         }),
@@ -1215,26 +2003,50 @@ const targetSubtypeOptions = useMemo(() => {
   };
 
   const waitForReviewResult = async (baseUrl, jobId) => {
-    for (let i = 0; i < 360; i += 1) {
+    while (true) {
       const statusRes = await fetch(`${baseUrl}/review-jobs/${jobId}`);
-      if (!statusRes.ok) throw new Error(`검수 상태 조회 실패: ${statusRes.status}`);
-      const statusJson = await statusRes.json();
-      setReviewJobInfo(statusJson);
 
-      if (statusJson.status === "completed") {
+      if (!statusRes.ok) {
+        throw new Error(`검수 상태 조회 실패: ${statusRes.status}`);
+      }
+
+      const statusJson = await statusRes.json();
+
+      setReviewJobInfo((prev) => ({
+        ...(prev || {}),
+        ...statusJson,
+        selected_review_check_count:
+          prev?.selected_review_check_count ?? selectedReviewCheckCount,
+        selected_review_check_labels:
+          prev?.selected_review_check_labels?.length
+            ? prev.selected_review_check_labels
+            : selectedReviewCheckLabels,
+      }));
+
+      if (["completed", "partial_failed", "partial_canceled"].includes(statusJson.status)) {
         const resultRes = await fetch(`${baseUrl}/review-jobs/${jobId}/result`);
-        if (!resultRes.ok) throw new Error(`검수 결과 조회 실패: ${resultRes.status}`);
+
+        if (!resultRes.ok) {
+          if (statusJson.status === "completed") {
+            throw new Error(`검수 결과 조회 실패: ${resultRes.status}`);
+          }
+
+          throw new Error(statusJson.error_message || "부분 검수 결과를 찾지 못했습니다.");
+        }
+
         return await resultRes.json();
       }
 
       if (statusJson.status === "canceled") {
-        throw new Error("검수 작업이 취소되었습니다.");
+        throw new Error("검수 작업이 취소되었습니다. 저장된 부분 결과가 없습니다.");
       }
 
-      if (statusJson.status === "failed") throw new Error(statusJson.error_message || "검수 작업이 실패했습니다.");
+      if (statusJson.status === "failed") {
+        throw new Error(statusJson.error_message || "검수 작업이 실패했습니다.");
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 5000));
     }
-    throw new Error("검수 결과 대기 시간이 초과되었습니다.");
   };
 
   const cancelCurrentReview = async () => {
@@ -1331,8 +2143,15 @@ const targetSubtypeOptions = useMemo(() => {
 
     const totalQuestionCount = jobTargets.reduce((sum, item) => sum + item.rowsForMap.length, 0);
 
+    if (selectedReviewCheckCount === 0) {
+      alert("선택된 검수 항목이 없습니다. 최소 1개 이상의 검수 항목을 선택해 주세요.");
+      return;
+    }
+
     const proceed = window.confirm(
-      `${jobTargets.length}개 매핑의 총 ${totalQuestionCount}개 문제를 AI 검수 API로 보낼까요?`
+      `${jobTargets.length}개 매핑의 총 ${totalQuestionCount}개 문제를 AI 검수 API로 보낼까요?
+선택된 검수 항목: ${selectedReviewCheckCount}개
+${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
     );
 
     if (!proceed) return;
@@ -1359,25 +2178,48 @@ const targetSubtypeOptions = useMemo(() => {
         }
 
         const created = await createRes.json();
-        setReviewJobInfo(created);
+        setReviewJobInfo({
+          ...created,
+          selected_review_check_count: selectedReviewCheckCount,
+          selected_review_check_labels: selectedReviewCheckLabels,
+        });
 
         const result = await waitForReviewResult(baseUrl, created.job_id);
-        await applyAiReviewResult(result);
+        await applyAiReviewResult(result, {
+          labels: selectedReviewCheckLabels,
+          summary: makeReviewRunTitle(selectedReviewCheckLabels),
+        });
 
         totalReviewed = result.summary?.total_questions ?? 0;
         totalIssues = result.summary?.issue_question_count ?? 0;
         totalMappingErrors = result.summary?.mapping_error_count ?? 0;
 
+        const skippedQuestionCount = result.summary?.skipped_question_count ?? 0;
+        const requestedQuestionCount =
+          result.summary?.requested_question_count ?? totalReviewed + skippedQuestionCount;
+
         await fetchQuestions();
+
+        const isPartial =
+          !!result.partial ||
+          ["partial_failed", "partial_canceled"].includes(result.status);
 
         alert(
           [
-            "AI 검수가 완료되었습니다.",
+            isPartial
+              ? "AI 검수가 중간에 중단되었지만, 완료된 문제 결과는 반영했습니다."
+              : skippedQuestionCount
+                ? "AI 검수가 완료되었습니다. 단, 일부 문제는 API 오류로 건너뛰었습니다."
+                : "AI 검수가 완료되었습니다.",
             "검수 작업: 1개",
             `검수 매핑: ${jobTargets.length}개`,
-            `ChatGPT 검수 문제: ${totalReviewed}개`,
+            `요청 문제: ${requestedQuestionCount}개`,
+            `ChatGPT 검수 완료 문제: ${totalReviewed}개`,
+            skippedQuestionCount ? `API 오류로 건너뛴 문제: ${skippedQuestionCount}개` : "",
+            `적용 검수 항목: ${selectedReviewCheckText}`,
             `오류 문제: ${totalIssues}개`,
             totalMappingErrors ? `매핑 오류: ${totalMappingErrors}개` : "",
+            isPartial && result.error_message ? `중단 사유: ${result.error_message}` : "",
           ].filter(Boolean).join("\n")
         );
     } catch (error) {
@@ -1429,6 +2271,9 @@ const targetSubtypeOptions = useMemo(() => {
       reflect_status: row.reflectStatus || getValue(raw, ["reflect_status"], "미반영"),
       answer: row.answer || getValue(raw, ["answer", "정답"], ""),
       keywords: getValue(raw, ["keywords", "keyword", "키워드"], ""),
+      review_check_labels: row.reviewCheckLabels || parseLabelList(raw.review_check_labels),
+      review_scope_summary: row.reviewScopeSummary || getValue(raw, ["review_scope_summary"], ""),
+      review_check_history: normalizeReviewHistory(row.reviewCheckHistory || raw.review_check_history),
 
     });
   };
@@ -1450,6 +2295,20 @@ const targetSubtypeOptions = useMemo(() => {
     });
   };
 
+  const deleteReviewHistoryEntry = (targetIndex) => {
+    setEditForm((prev) => {
+      const currentHistory = normalizeReviewHistory(prev.review_check_history);
+      const nextHistory = currentHistory.filter((_, index) => index !== targetIndex);
+      const rebuilt = rebuildReviewFieldsFromHistory(nextHistory);
+
+      return {
+        ...prev,
+        ...rebuilt,
+      };
+    });
+  };
+
+
   const saveReview = async (nextStatus) => {
     if (!editForm?.id) {
       alert("저장할 문제 ID가 없습니다.");
@@ -1460,9 +2319,13 @@ const targetSubtypeOptions = useMemo(() => {
       ...editForm,
       review_status: nextStatus || editForm.status,
       status: nextStatus || editForm.status,
-      error_type: (editForm.error_types || []).join(", "),
+      error_type: normalizeErrorTypes(editForm.error_types || []).join(", "),
       reason: editForm.reason || "",
       suggestion: editForm.suggestion || "",
+      keywords: editForm.keywords || "",
+      review_check_history: normalizeReviewHistory(editForm.review_check_history),
+      review_check_labels: uniqueLabels(editForm.review_check_labels || []),
+      review_scope_summary: editForm.review_scope_summary || makeReviewScopeSummary(editForm.review_check_labels || []),
     };
 
     try {
@@ -1474,6 +2337,10 @@ const targetSubtypeOptions = useMemo(() => {
           error_type: updated.error_type,
           reason: updated.reason,
           suggestion: updated.suggestion,
+          keywords: updated.keywords,
+          review_check_labels: updated.review_check_labels.join(", "),
+          review_scope_summary: updated.review_scope_summary,
+          review_check_history: JSON.stringify(updated.review_check_history || []),
           reviewer: "admin",
           reflect_status: updated.reflect_status || "미반영",
         }),
@@ -1601,11 +2468,90 @@ const targetSubtypeOptions = useMemo(() => {
         </div>
       )}
 
+      <div className="review-check-panel">
+        <div className="review-check-head">
+          <strong>검수 항목 선택</strong>
+          <span>선택 {selectedReviewCheckCount}개</span>
+        </div>
+
+        <div className="review-selected-checks">
+          <strong>현재 선택된 검수</strong>
+          <span>{selectedReviewCheckText}</span>
+        </div>
+
+        <div className="review-check-presets">
+          {Object.entries(REVIEW_CHECK_PRESETS).map(([key, preset]) => (
+            <button
+              key={key}
+              type="button"
+              className={[
+                "review-check-preset-btn",
+                key === "cancel" ? "danger" : "",
+                activeReviewPreset === key ? "active" : "",
+              ].filter(Boolean).join(" ")}
+              onClick={() => applyReviewCheckPreset(key)}
+              disabled={reviewRunning}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="review-check-grid">
+          <div className="review-check-group">
+            <div className="review-check-group-title">내용 검수</div>
+            <div className="review-check-list">
+              {Object.entries(REVIEW_CHECK_GROUPS.content).map(([groupKey, item]) => (
+                <label
+                  key={groupKey}
+                  className="review-check-item"
+                  title={item.description}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isReviewGroupChecked(reviewChecks, "content", groupKey)}
+                    onChange={() => {
+                      setActiveReviewPreset("");
+                      toggleReviewGroup(setReviewChecks, "content", groupKey);
+                    }}
+                  />
+                  <span>{item.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="review-check-group">
+            <div className="review-check-group-title">형식 검수</div>
+            <div className="review-check-list">
+              {Object.entries(REVIEW_CHECK_GROUPS.format).map(([groupKey, item]) => (
+                <label
+                  key={groupKey}
+                  className="review-check-item"
+                  title={item.description}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isReviewGroupChecked(reviewChecks, "format", groupKey)}
+                    onChange={() => {
+                      setActiveReviewPreset("");
+                      toggleReviewGroup(setReviewChecks, "format", groupKey);
+                    }}
+                  />
+                  <span>{item.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
       {reviewJobInfo && (
         <div className="review-status-line">
           <strong>최근 작업</strong>
           <span>job_id: {reviewJobInfo.job_id || "-"}</span>
           <span>status: {reviewJobInfo.status || "-"}</span>
+          <span>검수 항목: {formatSelectedReviewCheckLabels(reviewJobInfo.selected_review_check_labels || [])}</span>
         </div>
       )}
 
@@ -1853,15 +2799,27 @@ const targetSubtypeOptions = useMemo(() => {
           </select>
         </label>
         <label className="field">
-          <span>시험 고유 번호</span>
-          <select name="examUniqueNo" value={filters.examUniqueNo} onChange={handleFilterChange}>
-            {options.examUniqueNo.map((item) => <option key={item} value={item}>{item}</option>)}
+          <span>세트명</span>
+          <select name="setName" value={filters.setName} onChange={handleFilterChange}>
+            {options.setName.map((item) => <option key={item} value={item}>{item}</option>)}
           </select>
         </label>
         <label className="field">
           <span>과목명</span>
           <select name="subjectName" value={filters.subjectName} onChange={handleFilterChange}>
             {options.subjectName.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>하위유형</span>
+          <select name="subtypeName" value={filters.subtypeName} onChange={handleFilterChange}>
+            {options.subtypeName.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>시험 고유 번호</span>
+          <select name="examUniqueNo" value={filters.examUniqueNo} onChange={handleFilterChange}>
+            {options.examUniqueNo.map((item) => <option key={item} value={item}>{item}</option>)}
           </select>
         </label>
         <label className="field">
@@ -1898,7 +2856,7 @@ const targetSubtypeOptions = useMemo(() => {
         </label>
         <label className="field field-wide">
           <span>검색</span>
-          <input name="search" value={filters.search} onChange={handleFilterChange} placeholder="IDX, 강좌명, 시험 고유 번호, 과목명, CD값, 문제, 번호 검색" />
+          <input name="search" value={filters.search} onChange={handleFilterChange} placeholder="IDX, 강좌명, 세트명, 과목명, 하위유형, 업로드파일, 장, 절, 학습목표, 번호, 문제 검색" />
         </label>
       </div>
       <div className="filter-actions">
@@ -2101,8 +3059,10 @@ const targetSubtypeOptions = useMemo(() => {
     );
   };
 
-  const renderQuestionTable = ({rowsToShow, title, showCount = false, totalCount = null, emptyText = "조회된 문제가 없습니다.",}) => {
+  const renderQuestionTable = ({rowsToShow, title, showCount = false, totalCount = null, emptyText = "조회된 문제가 없습니다.", tableVariant = "list",}) => {
     const allVisibleChecked = rowsToShow.length > 0 && rowsToShow.every((row) => selectedRows.includes(row.rowKey));
+    const isTargetTable = tableVariant === "target";
+    const emptyColSpan = isTargetTable ? 16 : 15;
 
     return (
       <section className="table-card">
@@ -2135,35 +3095,60 @@ const targetSubtypeOptions = useMemo(() => {
         {loadError && <div className="alert">{loadError}</div>}
 
         <div className="table-wrap">
-          <table className="review-table compact-review-table">
+          <table className={`review-table compact-review-table ${isTargetTable ? "target-review-table" : ""}`}>
             <thead>
               <tr>
                 <th className="check-col"><input type="checkbox" checked={allVisibleChecked} onChange={(event) => toggleAll(event.target.checked, rowsToShow)} /></th>
-                <th>IDX</th>
-                <th>강좌명</th>
-                <th className="exam-no-col">시험 고유 번호</th>
-                <th>과목명</th>
-                <th className="cd-col">CD값</th>
-                <th className="number-col">번호</th>
-                <th>문제</th>
-                <th className="review-status-col">검수상태</th>
-                <th>오류유형</th>
-                <th>오류사유</th>
-                <th className="reviewer-col">검수자</th>
-                <th>검수일</th>
-                <th>반영상태</th>
-                <th className="manage-col">관리</th>
+                {isTargetTable ? (
+                  <>
+                    <th className="idx-col">IDX</th>
+                    <th className="upload-file-col">업로드파일</th>
+                    <th className="subject-col">과목</th>
+                    <th className="chapter-col">장</th>
+                    <th className="section-col">절</th>
+                    <th className="goal-col">학습목표</th>
+                    <th className="number-col">번호</th>
+                    <th className="question-main-col">문제</th>
+                    <th className="review-status-col">검수상태</th>
+                    <th className="error-type-col">오류유형</th>
+                    <th className="reason-col">기타사유</th>
+                    <th className="reviewer-col">검수자</th>
+                    <th className="reviewed-at-col">검수일</th>
+                    <th className="reflect-status-col">반영상태</th>
+                    <th className="manage-col">관리</th>
+                  </>
+                ) : (
+                  <>
+                    <th>IDX</th>
+                    <th>강좌명</th>
+                    <th className="exam-no-col">시험 고유 번호</th>
+                    <th>과목명</th>
+                    <th className="cd-col">CD값</th>
+                    <th className="number-col">번호</th>
+                    <th>문제</th>
+                    <th className="review-status-col">검수상태</th>
+                    <th>오류유형</th>
+                    <th>오류사유</th>
+                    <th className="reviewer-col">검수자</th>
+                    <th>검수일</th>
+                    <th>반영상태</th>
+                    <th className="manage-col">관리</th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan="15" className="empty-cell">데이터를 불러오는 중입니다.</td></tr>
+                <tr><td colSpan={emptyColSpan} className="empty-cell">데이터를 불러오는 중입니다.</td></tr>
               ) : rowsToShow.length === 0 ? (
-                <tr><td colSpan="15" className="empty-cell">{emptyText}</td></tr>
+                <tr><td colSpan={emptyColSpan} className="empty-cell">{emptyText}</td></tr>
               ) : rowsToShow.map((row) => {
-                const errorTypes = splitErrorTypes(row.errorType);
+                const errorTypes = normalizeErrorTypes(splitErrorTypes(row.errorType));
                 return (
-                  <tr key={row.rowKey}>
+                  <tr
+                    key={row.rowKey}
+                    className={selectedRows.includes(row.rowKey) ? "row-selected" : ""}
+                  >
                     <td className="check-col">
                       <input
                         type="checkbox"
@@ -2172,13 +3157,28 @@ const targetSubtypeOptions = useMemo(() => {
                       />
                     </td>
 
-                    <td>{row.id}</td>
-                    <td>{row.courseName || "-"}</td>
-                    <td className="exam-no-col">{row.examUniqueNo || "-"}</td>
-                    <td>{row.subjectName || "-"}</td>
-                    <td className="cd-col">{row.cdValue || "-"}</td>
-                    <td className="number-col">{row.number}</td>
-                    <td className="question-cell">{row.question}</td>
+                    {isTargetTable ? (
+                      <>
+                        <td className="idx-col">{row.id}</td>
+                        <td className="upload-file-col file-cell" title={row.uploadFile || "-"}>{row.uploadFile || "-"}</td>
+                        <td className="subject-col">{row.subjectName || "-"}</td>
+                        <td className="chapter-col">{row.chapter || "-"}</td>
+                        <td className="section-col">{row.section || "-"}</td>
+                        <td className="goal-col">{row.learningGoal || "-"}</td>
+                        <td className="number-col">{row.number}</td>
+                        <td className="question-cell question-main-col">{row.question}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td>{row.id}</td>
+                        <td>{row.courseName || "-"}</td>
+                        <td className="exam-no-col">{row.examUniqueNo || "-"}</td>
+                        <td>{row.subjectName || "-"}</td>
+                        <td className="cd-col">{row.cdValue || "-"}</td>
+                        <td className="number-col">{row.number}</td>
+                        <td className="question-cell">{row.question}</td>
+                      </>
+                    )}
 
                     <td className="review-status-col">
                       <div className="status-box">
@@ -2186,10 +3186,11 @@ const targetSubtypeOptions = useMemo(() => {
                           {row.reviewStatus}
                         </span>
                         {row.statusMemo && <small>{row.statusMemo}</small>}
+                        {row.reviewScopeSummary && <small className="review-scope-small">검수: {row.reviewScopeSummary}</small>}
                       </div>
                     </td>
 
-                    <td>
+                    <td className={isTargetTable ? "error-type-col" : ""}>
                       <div className="pill-list">
                         {errorTypes.length === 0 ? (
                           <span className="pill pill-muted">-</span>
@@ -2203,13 +3204,13 @@ const targetSubtypeOptions = useMemo(() => {
                       </div>
                     </td>
 
-                    <td className="reason-cell" title={row.reason}>
+                    <td className={isTargetTable ? "reason-cell reason-col" : "reason-cell"}>
                       <div className="reason-preview">{row.reason}</div>
                     </td>
                     <td className="reviewer-col">{row.reviewer}</td>
-                    <td>{row.reviewedAt}</td>
+                    <td className={isTargetTable ? "reviewed-at-col" : ""}>{row.reviewedAt}</td>
 
-                    <td>
+                    <td className={isTargetTable ? "reflect-status-col" : ""}>
                       <span className={`reflect ${getReflectClass(row.reflectStatus)}`}>
                         {row.reflectStatus}
                       </span>
@@ -2269,8 +3270,10 @@ const targetSubtypeOptions = useMemo(() => {
           >
             매핑 관리
           </button>
-          <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={handleExcelUpload} />
-          <button className="btn btn-primary" type="button" onClick={() => fileInputRef.current?.click()}>엑셀 업로드</button>
+          <input ref={questionFileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={handleQuestionExcelUpload} />
+          <input ref={cdMetaFileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={handleCdMetaExcelUpload} />
+          <button className="btn btn-primary" type="button" onClick={() => questionFileInputRef.current?.click()}>문제 엑셀 업로드</button>
+          <button className="btn btn-success" type="button" onClick={() => cdMetaFileInputRef.current?.click()}>CD 매핑 엑셀 업로드</button>
         </div>
       </header>
 
@@ -2280,6 +3283,7 @@ const targetSubtypeOptions = useMemo(() => {
           {renderQuestionTable({
             rowsToShow: reviewTargetPageRows,
             title: "검수 대상 문제 내역 ",
+            tableVariant: "target",
             showCount: true,
             totalCount: reviewTargetRows.length,
             emptyText: "표시할 문제가 없습니다. 매핑 DB와 문제 DB의 시험 고유 번호를 확인해 주세요.",
@@ -2293,6 +3297,7 @@ const targetSubtypeOptions = useMemo(() => {
           {renderQuestionTable({
             rowsToShow: pageRows,
             title: "문제 목록 ",
+            tableVariant: "target",
             showCount: true,
             totalCount: filteredRows.length,
             emptyText: "조회된 문제가 없습니다.",
@@ -2411,6 +3416,40 @@ const targetSubtypeOptions = useMemo(() => {
 
               <aside className="review-panel side-panel review-content-panel">
                 <div className="panel-title">검수 내용</div>
+
+                <div className="review-history-box">
+                  <div className="review-history-head">
+                    <strong>누적 검수 내역</strong>
+                    <span>{editForm.review_scope_summary || makeReviewScopeSummary(editForm.review_check_labels || [])}</span>
+                  </div>
+
+                  {Array.isArray(editForm.review_check_history) && editForm.review_check_history.length > 0 ? (
+                    <div className="review-history-list">
+                      {normalizeReviewHistory(editForm.review_check_history)
+                        .map((item, originalIndex) => ({ item, originalIndex }))
+                        .reverse()
+                        .slice(0, 6)
+                        .map(({ item, originalIndex }) => (
+                          <div className="review-history-item" key={`${item.at || originalIndex}-${originalIndex}`}>
+                            <div className="review-history-text">
+                              <strong>{item.summary || makeReviewScopeSummary(item.labels || [])}</strong>
+                              <span>{item.result || "-"} · {item.issue_count ?? 0}건</span>
+                            </div>
+
+                            <button
+                              type="button"
+                              className="review-history-delete-btn"
+                              onClick={() => deleteReviewHistoryEntry(originalIndex)}
+                            >
+                              삭제
+                            </button>
+                          </div>
+                        ))}
+                    </div>
+                  ) : (
+                    <div className="review-history-empty">아직 저장된 검수 항목 내역이 없습니다.</div>
+                  )}
+                </div>
 
                 <div className="review-content-top">
                   <label className="full-field review-status-field">

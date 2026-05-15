@@ -369,6 +369,14 @@ a {
   background: #f9fbff;
 }
 
+.review-table tr.row-selected td {
+  background: #eff6ff;
+}
+
+.review-table tr.row-selected:hover td {
+  background: #dbeafe;
+}
+
 .review-table th:nth-child(1),
 .review-table td:nth-child(1) {
   width: 42px;
@@ -1051,14 +1059,6 @@ a {
   margin-top: 10px;
 }
 
-.field-hint {
-  margin-left: 4px;
-  font-size: 11px;
-  font-weight: 700;
-  color: #6b7280;
-  font-style: normal;
-}
-
 .review-target-table th:nth-child(1),
 .review-target-table td:nth-child(1) { width: 80px; }
 .review-target-table th:nth-child(2),
@@ -1087,19 +1087,6 @@ a {
   font-style: normal;
   font-weight: 700;
   color: #6b7280;
-}
-
-.review-status-line {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 14px;
-  padding: 12px 14px;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  background: #eff6ff;
-  color: #1e3a8a;
-  font-size: 13px;
 }
 
 .checkbox-field .inline-check,
@@ -1417,15 +1404,6 @@ a {
   color: #111827;
 }
 
-.side-actions button {
-  min-height: 42px;
-  border-radius: 6px;
-  color: #ffffff;
-  font-size: 14px;
-  font-weight: 900;
-  cursor: pointer;
-}
-
 /* =========================
    Review modal final override
    아래 변수만 바꾸면 칸 길이 조정 가능
@@ -1524,11 +1502,6 @@ a {
   margin-bottom: 0;
 }
 
-/* 오른쪽 검수 내용 패널 */
-.review-content-panel {
-  border-color: #ddd6fe;
-  overflow-y: auto;
-}
 
 /* 검수 상태 옆에 버튼 3개 배치 */
 .review-content-top {
@@ -1891,4 +1864,567 @@ a {
     height: 150px;
     min-height: 150px;
   }
+}
+/* =========================
+   Selectable AI review checks
+========================= */
+.review-check-panel {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.review-check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.review-check-head strong {
+  font-size: 15px;
+  font-weight: 900;
+  color: #111827;
+}
+
+.review-check-head span {
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.review-check-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.review-check-preset-btn {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.review-check-preset-btn:hover:not(:disabled) {
+  background: #eef2ff;
+}
+
+.review-check-preset-btn.active {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+
+.review-check-preset-btn.active:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.review-check-preset-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.review-check-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.35fr;
+  gap: 12px;
+}
+
+.review-check-group {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #edf0f5;
+  border-radius: 8px;
+  background: #fafbfe;
+}
+
+.review-check-group-title {
+  margin-bottom: 9px;
+  font-size: 13px;
+  font-weight: 900;
+  color: #111827;
+}
+
+.review-check-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.review-check-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.review-check-item input {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.review-check-item:has(input:checked) {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+@media (max-width: 900px) {
+  .review-check-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 취소 버튼: 검수 항목 전체 해제 */
+.review-check-preset-btn.danger {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.review-check-preset-btn.danger:hover:not(:disabled) {
+  background: #ffe4e6;
+}
+
+/* =========================
+   검수 대상 문제 내역 컬럼 구성
+   이미지 기준: IDX / 업로드파일 / 과목 / 장 / 절 / 학습목표 / 번호 / 문제 / 검수정보
+========================= */
+.review-table.compact-review-table.target-review-table {
+  min-width: 1837px;
+  table-layout: fixed;
+}
+
+.target-review-table th.idx-col,
+.target-review-table td.idx-col { width: 46px; min-width: 46px; max-width: 46px; text-align: center; }
+
+.target-review-table th.upload-file-col,
+.target-review-table td.upload-file-col { width: 86px; min-width: 86px; max-width: 86px; }
+
+.target-review-table th.subject-col,
+.target-review-table td.subject-col { width: 80px; min-width: 80px; max-width: 80px; }
+
+.target-review-table th.chapter-col,
+.target-review-table td.chapter-col { width: 110px; min-width: 110px; max-width: 110px; }
+
+.target-review-table th.section-col,
+.target-review-table td.section-col { width: 130px; min-width: 130px; max-width: 130px; }
+
+.target-review-table th.goal-col,
+.target-review-table td.goal-col { width: 190px; min-width: 190px; max-width: 190px; }
+
+.target-review-table th.number-col,
+.target-review-table td.number-col { width: 52px; min-width: 52px; max-width: 52px; text-align: center; }
+
+
+.target-review-table th.question-main-col,
+.target-review-table td.question-main-col { width: 360px; min-width: 360px; max-width: 360px; }
+
+.target-review-table th.review-status-col,
+.target-review-table td.review-status-col { width: 96px; min-width: 96px; max-width: 96px; text-align: center; }
+
+.target-review-table th.error-type-col,
+.target-review-table td.error-type-col { width: 280px; min-width: 280px; max-width: 280px; }
+
+.target-review-table th.reason-col,
+.target-review-table td.reason-col { width: 100px; min-width: 100px; max-width: 100px; }
+
+.target-review-table th.reviewer-col,
+.target-review-table td.reviewer-col { width: 82px; min-width: 82px; max-width: 82px; text-align: center; }
+
+.target-review-table th.reviewed-at-col,
+.target-review-table td.reviewed-at-col { width: 100px; min-width: 100px; max-width: 100px; text-align: center; }
+
+.target-review-table th.reflect-status-col,
+.target-review-table td.reflect-status-col { width: 92px; min-width: 92px; max-width: 92px; text-align: center; }
+
+.target-review-table th.manage-col,
+.target-review-table td.manage-col { width: 94px; min-width: 94px; max-width: 94px; text-align: center; }
+
+.target-review-table td.upload-file-col,
+.target-review-table td.subject-col,
+.target-review-table td.chapter-col,
+.target-review-table td.section-col,
+.target-review-table td.goal-col,
+.target-review-table td.reviewed-at-col {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-review-table td.question-main-col {
+  line-height: 1.45;
+  white-space: normal;
+  word-break: keep-all;
+}
+
+.target-review-table td.error-type-col .pill-list {
+  max-height: 76px;
+  overflow: hidden;
+}
+
+.target-review-table td.reason-col .reason-preview {
+  max-height: 76px;
+  -webkit-line-clamp: 4;
+}
+
+@media (max-width: 768px) {
+  .review-table.compact-review-table.target-review-table {
+    min-width: 1837px;
+  }
+}
+
+/* =========================
+   Desktop target table fit override
+   검수 대상/문제 목록 테이블을 1화면 폭 안에 맞춤
+========================= */
+@media (min-width: 1100px) {
+  .table-card {
+    padding: 16px;
+  }
+
+  .table-wrap {
+    overflow-x: hidden;
+  }
+
+  .review-table.compact-review-table.target-review-table {
+    width: 100%;
+    min-width: 0 !important;
+    table-layout: fixed;
+  }
+
+  .target-review-table th,
+  .target-review-table td {
+    padding: 10px 6px !important;
+    font-size: 12px;
+    line-height: 1.45;
+    vertical-align: top;
+    min-width: 0 !important;
+    max-width: none !important;
+  }
+
+  .target-review-table .check-col {
+    width: 2.1% !important;
+    text-align: center !important;
+  }
+
+  .target-review-table th.idx-col,
+  .target-review-table td.idx-col {
+    width: 2.7% !important;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .target-review-table th.upload-file-col,
+  .target-review-table td.upload-file-col {
+    width: 4.5% !important;
+  }
+
+  .target-review-table th.subject-col,
+  .target-review-table td.subject-col {
+    width: 4.0% !important;
+  }
+
+  .target-review-table th.chapter-col,
+  .target-review-table td.chapter-col {
+    width: 5.7% !important;
+  }
+
+  .target-review-table th.section-col,
+  .target-review-table td.section-col {
+    width: 6.5% !important;
+  }
+
+  .target-review-table th.goal-col,
+  .target-review-table td.goal-col {
+    width: 9.5% !important;
+  }
+
+  .target-review-table th.number-col,
+  .target-review-table td.number-col {
+    width: 2.6% !important;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .target-review-table th.question-main-col,
+  .target-review-table td.question-main-col {
+    width: 22.5% !important;
+  }
+
+  .target-review-table th.review-status-col,
+  .target-review-table td.review-status-col {
+    width: 5.2% !important;
+    text-align: center;
+  }
+
+  .target-review-table th.error-type-col,
+  .target-review-table td.error-type-col {
+    width: 13.0% !important;
+  }
+
+  .target-review-table th.reason-col,
+  .target-review-table td.reason-col {
+    width: 3.7% !important;
+  }
+
+  .target-review-table th.reviewer-col,
+  .target-review-table td.reviewer-col {
+    width: 3.6% !important;
+    text-align: center;
+  }
+
+  .target-review-table th.reviewed-at-col,
+  .target-review-table td.reviewed-at-col {
+    width: 6.4% !important;
+    text-align: center;
+  }
+
+  .target-review-table th.reflect-status-col,
+  .target-review-table td.reflect-status-col {
+    width: 4.3% !important;
+    text-align: center;
+  }
+
+  .target-review-table th.manage-col,
+  .target-review-table td.manage-col {
+    width: 3.7% !important;
+    text-align: center;
+  }
+
+  .target-review-table td.upload-file-col,
+  .target-review-table td.subject-col,
+  .target-review-table td.chapter-col,
+  .target-review-table td.section-col,
+  .target-review-table td.goal-col {
+    white-space: normal !important;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+    overflow: hidden;
+    text-overflow: clip;
+  }
+
+  .target-review-table td.question-main-col {
+    white-space: normal;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+    overflow: hidden;
+  }
+
+  .target-review-table td.reviewed-at-col {
+    white-space: normal !important;
+    word-break: keep-all;
+  }
+
+  .target-review-table td.error-type-col .pill-list {
+    gap: 4px;
+    max-height: 58px;
+    overflow: hidden;
+  }
+
+  .target-review-table .pill {
+    min-height: 22px;
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+
+  .target-review-table .badge,
+  .target-review-table .reflect {
+    min-height: 24px;
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .target-review-table .status-box {
+    align-items: center;
+    gap: 5px;
+  }
+
+  .target-review-table .status-box small {
+    max-width: 100%;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: 11px;
+    line-height: 1.35;
+    text-align: center;
+  }
+
+  .target-review-table td.reason-col .reason-preview {
+    max-height: 50px;
+    -webkit-line-clamp: 3;
+    font-size: 12px;
+  }
+
+  .target-review-table td.manage-col {
+    vertical-align: middle;
+  }
+
+  .target-review-table td.manage-col .btn-row {
+    width: 100%;
+    min-width: 0;
+    min-height: 34px;
+    padding: 0 4px;
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 1099px) {
+  .review-table.compact-review-table.target-review-table {
+    min-width: 1500px;
+  }
+}
+
+/* 선택한 AI 검수 항목 표시 */
+.review-selected-checks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #1f2937;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.review-selected-checks strong {
+  font-weight: 900;
+  color: #1d4ed8;
+  white-space: nowrap;
+}
+
+.review-selected-checks span {
+  min-width: 0;
+  word-break: keep-all;
+}
+
+/* =========================
+   Review history / coverage
+========================= */
+.review-scope-small {
+  font-weight: 800;
+  color: #2563eb !important;
+}
+
+.review-history-box {
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.review-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.review-history-head strong {
+  font-size: 13px;
+  font-weight: 900;
+  color: #111827;
+}
+
+.review-history-head span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.review-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.review-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 30px;
+  padding: 7px 9px;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.review-history-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 900;
+  color: #111827;
+}
+
+.review-history-item span,
+.review-history-empty {
+  font-size: 12px;
+  font-weight: 800;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+
+.review-history-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.review-history-delete-btn {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.review-history-delete-btn:hover {
+  background: #dc2626;
 }

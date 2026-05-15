@@ -35,8 +35,7 @@ site_ui/build/
 # Local database
 # -------------------------
 *.db
-*.sqlite
-*.sqlite3
+review_app.db
 
 # -------------------------
 # Generated / runtime files
