@@ -11,6 +11,7 @@ from prompt_rules import (
     CONTENT_PROBLEM_VALIDITY,
     CONTENT_IMAGE_VALIDATION,
     CONTENT_ANSWER_VALIDATION,
+    CONTENT_BEST_CHOICE_HANDLING,
     CONTENT_EXPLANATION_LOGIC,
     CONTENT_SOURCE_CONSISTENCY,
     CONTENT_CHOICE_EXPLANATION_MATCH,
@@ -353,6 +354,13 @@ def build_review_prompt(checks: Dict[str, Any] | None = None) -> str:
         parts.append(CONTENT_HEADER)
         parts.append(CONTENT_PRIORITY)
 
+
+        if (content_checks.get("answer_validation")
+            or content_checks.get("explanation_logic")
+            or content_checks.get("choice_explanation_match")
+            ):
+            parts.append(CONTENT_BEST_CHOICE_HANDLING)
+        
         if content_checks.get("problem_validity"):
             parts.append(CONTENT_PROBLEM_VALIDITY)
         if content_checks.get("image_validation"):

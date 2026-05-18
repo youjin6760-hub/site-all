@@ -253,7 +253,7 @@ const REVIEW_CHECK_GROUPS = {
     keyword_validation: {
       label: "키워드 검수",
       keys: ["keyword_validation"],
-      description: "키워드가 문제의 핵심 개념과 맞는지, 누락되었거나 과도하게 넓지 않은지 확인합니다.",
+      description: "키워드가 문제의 핵심 개념과 맞는지, 누락되지 않았는지 확인합니다.",
     },
   },
 
@@ -1861,8 +1861,8 @@ const targetSubtypeOptions = useMemo(() => {
       })),
       options: {
         headless: true,
-        write_excel: true,
-        include_raw_data: true,
+        write_excel: false,
+        include_raw_data: false,
       },
     };
   };
@@ -1882,8 +1882,8 @@ const targetSubtypeOptions = useMemo(() => {
       checks: normalizeReviewChecksForPayload(reviewChecks),
       options: {
         headless: true,
-        write_excel: true,
-        include_raw_data: true,
+        write_excel: false,
+        include_raw_data: false,
         review_checks: normalizeReviewChecksForPayload(reviewChecks),
       },
     };

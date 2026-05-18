@@ -323,7 +323,7 @@ def normalize_issues(reviewed: dict[str, Any]) -> list[dict[str, Any]]:
 
 def build_site_result(job_id: str, target: dict[str, Any], reviewed_questions: list[dict[str, Any]]) -> dict[str, Any]:
     site_meta_map = get_question_site_meta_map(target)
-    include_raw_data = bool((target.get("options") or {}).get("include_raw_data", True))
+    include_raw_data = bool((target.get("options") or {}).get("include_raw_data", False))
 
     items: list[dict[str, Any]] = []
 
@@ -450,7 +450,7 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
 
         reviewed_questions = review_job_dir(
             job_path,
-            write_excel=bool(options.get("write_excel", True)),
+            write_excel=bool(options.get("write_excel", False)),
             cancel_checker=lambda: raise_if_cancelled(job_id),
             review_checks=review_checks,
         )

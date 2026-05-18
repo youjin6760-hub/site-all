@@ -191,6 +191,70 @@ def safe_text(locator):
     except Exception:
         return ""
 
+def normalize_multiline_text(value: str) -> str:
+    """
+    문제/보기/선지 본문용 정리 함수입니다.
+    <br>에서 만들어진 줄바꿈은 유지하고,
+    같은 줄 안의 불필요한 공백만 정리합니다.
+    """
+    if not value:
+        return ""
+
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = value.replace("\u00a0", " ")
+
+    # 줄 안의 공백만 정리
+    lines = [
+        re.sub(r"[ \t\f\v]+", " ", line).strip()
+        for line in value.split("\n")
+    ]
+
+    text = "\n".join(lines)
+
+    # 3줄 이상 빈 줄은 1줄 빈 줄로 제한
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
+def locator_text_with_br(locator) -> str:
+    """
+    Playwright locator에서 <br>을 실제 줄바꿈으로 보존해서 텍스트를 가져옵니다.
+    """
+    try:
+        text = locator.evaluate("""
+            (el) => {
+                const read = (node) => {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        return node.textContent || "";
+                    }
+
+                    if (node.nodeType !== Node.ELEMENT_NODE) {
+                        return "";
+                    }
+
+                    if (node.tagName && node.tagName.toLowerCase() === "br") {
+                        return "\\n";
+                    }
+
+                    let result = "";
+                    for (const child of node.childNodes) {
+                        result += read(child);
+                    }
+                    return result;
+                };
+
+                return read(el);
+            }
+        """)
+
+        return normalize_multiline_text(text)
+
+    except Exception:
+        try:
+            return normalize_multiline_text(locator.inner_text())
+        except Exception:
+            return ""
 
 def norm_id_text(x: str):
     x = (x or "").strip()
@@ -1269,11 +1333,12 @@ def login(page, user_id, password):
     save_debug(page, "after_login_main_reload")
 
 
-def extract_keywords(page):
+def extract_keywords(page, wait_ready=True):
     keywords = []
 
     try:
-        wait_until_explanation_ready(page)
+        if wait_ready:
+            wait_until_explanation_ready(page)
 
         for sel in EXPLANATION_KEYWORD_SELECTORS:
             items = page.locator(sel)
@@ -1581,14 +1646,13 @@ def detect_images(page, question_id, recollapse_after_choice_capture=False):
             if num in saved_choice_nums:
                 continue
 
-            text_raw = ""
+            text_val = ""
             try:
-                text_raw = li.locator("span.t1t1").first.text_content() or ""
+                text_locator = li.locator("span.t1t1").first
+                text_val = locator_text_with_br(text_locator)
             except Exception:
-                pass
-
-            text_val = re.sub(r"\s+", " ", text_raw).strip()
-            
+                text_val = ""
+    
             # 기존 코드 삭제
             # text_val = re.sub(r"^\d+\.\s*", "", text_val).strip()
 
@@ -1674,6 +1738,33 @@ def detect_images(page, question_id, recollapse_after_choice_capture=False):
         "question_image_capture_meta": question_image_capture_meta,
     }
 
+def wait_for_question_ready(page, timeout=10000) -> bool:
+    try:
+        page.locator("div.cp1question1 div.tg1 strong.tt1 span.tt1n").first.wait_for(
+            state="attached",
+            timeout=timeout,
+        )
+        page.locator("div.cp1question1 div.tg1 strong.tt1 > span.tt1t1").first.wait_for(
+            state="attached",
+            timeout=timeout,
+        )
+        return True
+    except Exception as e:
+        print(f"[경고] 문제 화면 준비 대기 실패: {e}")
+        return False
+
+
+def wait_for_list_ready(page, timeout=10000) -> bool:
+    try:
+        page.locator("div.cp1flist1 strong.t1, div.cp1flist2 strong.t1, li.li1 a.a1").first.wait_for(
+            state="attached",
+            timeout=timeout,
+        )
+        return True
+    except Exception as e:
+        print(f"[경고] 목록 화면 준비 대기 실패: {e}")
+        return False
+    
 
 def extract_question_number(page):
     try:
@@ -1710,34 +1801,69 @@ def extract_body_and_extra(page):
 
         result = root.evaluate("""
             (el) => {
-                const directTexts = [];
-                const nestedTexts = [];
+                const read = (node) => {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        return node.textContent || "";
+                    }
+
+                    if (node.nodeType !== Node.ELEMENT_NODE) {
+                        return "";
+                    }
+
+                    if (node.tagName && node.tagName.toLowerCase() === "br") {
+                        return "\\n";
+                    }
+
+                    let result = "";
+                    for (const child of node.childNodes) {
+                        result += read(child);
+                    }
+                    return result;
+                };
+
+                const directParts = [];
+                const nestedParts = [];
 
                 for (const node of el.childNodes) {
                     if (node.nodeType === Node.TEXT_NODE) {
-                        const txt = (node.textContent || "").replace(/\\s+/g, " ").trim();
-                        if (txt) directTexts.push(txt);
-                    } else if (
+                        directParts.push(node.textContent || "");
+                        continue;
+                    }
+
+                    if (
                         node.nodeType === Node.ELEMENT_NODE &&
                         node.matches("span.tt1t1")
                     ) {
-                        const txt = (node.textContent || "").replace(/\\s+/g, " ").trim();
-                        if (txt) nestedTexts.push(txt);
+                        nestedParts.push(read(node));
+                        continue;
+                    }
+
+                    if (
+                        node.nodeType === Node.ELEMENT_NODE &&
+                        node.tagName &&
+                        node.tagName.toLowerCase() === "br"
+                    ) {
+                        directParts.push("\\n");
+                        continue;
+                    }
+
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        directParts.push(read(node));
                     }
                 }
 
                 return {
-                    body: directTexts.join(" ").trim(),
-                    extra_text: nestedTexts.join(" ").trim()
+                    body: directParts.join(""),
+                    extra_text: nestedParts.join("\\n\\n")
                 };
             }
         """)
 
-        body = result.get("body", "").strip()
-        extra_text = result.get("extra_text", "").strip()
+        body = normalize_multiline_text(result.get("body", ""))
+        extra_text = normalize_multiline_text(result.get("extra_text", ""))
 
         print(f"[디버그] body: {repr(body)}")
-        print(f"[디버그] extra_text: {repr(extra_text)}")
+        print(f"[디버그] extra_text:\n{extra_text}")
 
     except Exception as e:
         print(f"[body/extra_text 추출 오류] {e}")
@@ -1754,9 +1880,9 @@ def extract_explanation(page):
         el = get_explanation_body_locator(page)
         el.wait_for(state="attached", timeout=5000)
 
-        text = el.inner_text().strip()
+        text = locator_text_with_br(el)
 
-        print(f"[디버그] 해설(줄바꿈 유지):\n{text[:300]}")
+        print(f"[디버그] 해설(<br> 줄바꿈 유지):\n{text[:300]}")
         return text
 
     except Exception as e:
@@ -1813,8 +1939,8 @@ def extract_choices(page, question_id, image_elements=None):
 
             text_val = ""
             try:
-                text_raw = li.locator("span.t1t1").first.text_content() or ""
-                text_val = re.sub(r"\s+", " ", text_raw).strip()
+                text_locator = li.locator("span.t1t1").first
+                text_val = locator_text_with_br(text_locator)
             except Exception:
                 text_val = ""
 
@@ -2132,7 +2258,6 @@ def navigate_to_target(page, cfg):
         if not click_course_card(page, course_name):
             save_debug(page, "course_not_found")
             raise RuntimeError(f"강좌 '{course_name}'를 찾지 못했습니다.")
-        page.wait_for_timeout(2000)
         save_debug(page, "after_course_click")
 
     if not click_bottom_nav_study(page):
@@ -2149,7 +2274,7 @@ def navigate_to_target(page, cfg):
         save_debug(page, "set_not_found")
         raise RuntimeError(f"세트 '{cfg['set_name']}'를 찾지 못했습니다.")
 
-    page.wait_for_timeout(2000)
+    wait_for_list_ready(page)
     save_debug(page, "after_set_click")
 
     if cfg.get("exam_round"):
@@ -2158,7 +2283,7 @@ def navigate_to_target(page, cfg):
             raise RuntimeError(f"회차 '{cfg['exam_round']}'를 찾지 못했습니다.")
 
         click_by_text(page, str(cfg["exam_round"]), exact=False)
-        page.wait_for_timeout(2000)
+        wait_for_question_ready(page)
         save_debug(page, "after_round_click")
 
     subjects = get_subjects(page, cfg)
@@ -2251,7 +2376,7 @@ def extract_question(page, course_name, set_name, subject_name, capture_assets=T
     explanation = extract_explanation(page)
     answer = extract_answer_from_dom(page)
     section_tags = extract_section_tags(page)
-    keywords = extract_keywords(page)
+    keywords = extract_keywords(page, wait_ready=False)
 
     should_capture_expl = should_capture_explanation(page, explanation)
 
@@ -2384,7 +2509,7 @@ def run_collect_configs(
 
                         if idx > 0:
                             page.goto(set_screen_url, wait_until="domcontentloaded")
-                            page.wait_for_timeout(2000)
+                            wait_for_list_ready(page)
                             save_debug(page, f"back_to_set_screen_{cfg_idx}_{idx}")
 
                         start_no, end_no = start_no_global, end_no_global
@@ -2405,7 +2530,7 @@ def run_collect_configs(
 
                                     if t_idx > 0:
                                         page.goto(set_screen_url, wait_until="domcontentloaded")
-                                        page.wait_for_timeout(2000)
+                                        wait_for_list_ready(page)
                                         save_debug(page, f"back_to_set_screen_{cfg_idx}_{idx}_{t_idx}")
 
                                         # 다시 과목 화면의 동일 과목/하위카드 구조를 기준으로 타겟 재계산
@@ -2419,9 +2544,9 @@ def run_collect_configs(
                                         print(f"[경고] 실행 대상 클릭 실패: {target}")
                                         continue
 
-                                    page.wait_for_timeout(2000)
-                                    save_debug(page, f"after_start_question_{cfg_idx}_{idx}_{t_idx}")
-
+                                    wait_for_question_ready(page)
+                                    save_debug(page, f"after_start_question_{cfg_idx}_{idx}")
+                                    
                                     while True:
                                         check_cancel(cancel_checker)
                                         current_question_no = -1
@@ -2484,7 +2609,7 @@ def run_collect_configs(
                             page.wait_for_timeout(1500)
                             handle_resume_popup(page)
 
-                            page.wait_for_timeout(2000)
+                            wait_for_question_ready(page)
                             save_debug(page, f"after_start_question_{cfg_idx}_{idx}")
 
                             while True:

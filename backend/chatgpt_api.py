@@ -8,6 +8,7 @@ import unicodedata
 from pathlib import Path
 import time
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI, RateLimitError
 from dotenv import load_dotenv
@@ -30,7 +31,6 @@ REVIEWED_DIR = Path(os.getenv("REVIEWED_DIR", ROOT / "reviewed_json")).resolve()
 
 # ISSUE_XLSX_PATH = ROOT / "json_issue_index.xlsx"
 ISSUE_XLSX_PATH = Path(os.getenv("ISSUE_XLSX_PATH", ROOT / "chatgpt.xlsx")).resolve()
-FORMULA_XLSX_PATH = Path(os.getenv("FORMULA_XLSX_PATH", ROOT / "formula.xlsx")).resolve()
 
 MODEL_NAME = os.getenv("CHATGPT_MODEL", "gpt-5.4")
 MAX_TOKENS = int(os.getenv("CHATGPT_MAX_OUTPUT_TOKENS", "6000"))
@@ -42,6 +42,7 @@ MAX_EXPLANATION_IMAGES = 2
 MAX_PER_QUESTION_API_RETRIES = 3
 MAX_CONSECUTIVE_REVIEW_FAILURES = 5
 
+MAX_REVIEW_WORKERS = int(os.getenv("MAX_REVIEW_WORKERS", "3"))
 
 def get_selected_review_checks(review_checks: dict[str, Any] | None = None) -> dict[str, dict[str, bool]]:
     """프론트에서 전달한 선택 검수값을 기본값과 병합합니다."""
@@ -132,20 +133,6 @@ ISSUE_HEADERS = [
     "suggestion",
 ]
 
-FORMULA_HEADERS = [
-    "question_id",
-    "file_name",
-    "question_no",
-    "subject_name",
-    "sub_title",
-    "has_formula_explanation",
-    "explanation_image_count",
-    "capture_mode",
-    "needs_manual_review",
-    "explanation_images",
-    "formula_reason",
-]
-
 def last_non_empty_row(ws):
     for row in range(ws.max_row, 0, -1):
         if any(
@@ -217,22 +204,6 @@ def save_issue_rows_to_xlsx(issue_rows):
     wb.save(ISSUE_XLSX_PATH)
     print(f"[ISSUE XLSX 저장 완료] {ISSUE_XLSX_PATH}")
     
-            
-def has_formula_explanation(data: dict):
-    explanation_images = data.get("explanation_images", []) or []
-    meta = data.get("explanation_capture_meta", {}) or {}
-
-    reasons = []
-
-    if explanation_images:
-        reasons.append("해설 스크린샷 존재")
-
-    capture_mode = meta.get("capture_mode")
-
-    if meta.get("attempted") is True and capture_mode not in ("not_needed", "not_attempted"):
-        reasons.append(f"collect 수식 조건 감지: capture_mode={capture_mode}")
-
-    return bool(reasons), ", ".join(reasons)
 
 def is_cancel_exception(error: Exception) -> bool:
     return error.__class__.__name__ == "JobCancelled"
@@ -283,71 +254,7 @@ def save_review_errors(skipped_errors: list[dict[str, Any]]) -> None:
         json.dump(skipped_errors, f, ensure_ascii=False, indent=2)
 
     print(f"[REVIEW 오류 목록 저장] {error_path}")
-
-def save_formula_rows_to_xlsx(formula_rows):
-    if not formula_rows:
-        print("[FORMULA XLSX] 저장할 수식 해설 문제 없음")
-        return
-
-    is_existing_file = FORMULA_XLSX_PATH.exists()
-
-    if is_existing_file:
-        wb = load_workbook(FORMULA_XLSX_PATH)
-    else:
-        wb = Workbook()
-        wb.remove(wb.active)
-
-    ws_map = {ws.title: ws for ws in wb.worksheets}
-    existing_sheet_names = set(ws_map.keys())
-    separated_sheets = set()
-
-    for row_data in formula_rows:
-        sheet_base = row_data.get("sub_title") or row_data.get("subject_name") or "formula"
-        sheet_name = safe_sheet_name(sheet_base)
-
-        if sheet_name not in ws_map:
-            ws = wb.create_sheet(sheet_name)
-            ws_map[sheet_name] = ws
-
-            for col_idx, header in enumerate(FORMULA_HEADERS, start=1):
-                ws.cell(row=1, column=col_idx, value=header)
-
-            next_row = 2
-        else:
-            ws = ws_map[sheet_name]
-            last_row = last_non_empty_row(ws)
-
-            if (
-                sheet_name in existing_sheet_names
-                and last_row > 1
-                and sheet_name not in separated_sheets
-            ):
-                next_row = last_row + 2
-                separated_sheets.add(sheet_name)
-            else:
-                next_row = last_row + 1
-
-        row_values = [
-            row_data["question_id"],
-            row_data["file_name"],
-            row_data["question_no"],
-            row_data["subject_name"],
-            row_data["sub_title"],
-            row_data["has_formula_explanation"],
-            row_data["explanation_image_count"],
-            row_data["capture_mode"],
-            row_data["needs_manual_review"],
-            row_data["explanation_images"],
-            row_data["formula_reason"],
-        ]
-
-        for col_idx, value in enumerate(row_values, start=1):
-            ws.cell(row=next_row, column=col_idx, value=safe_excel_text(value))
-
-    wb.save(FORMULA_XLSX_PATH)
-    print(f"[FORMULA XLSX 저장 완료] {FORMULA_XLSX_PATH}")
-    
-              
+           
 # =========================
 # API 입력 구성
 # =========================
@@ -489,7 +396,8 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
             "- 이미지 선지의 표/값/행 내용은 형식 검수에서 판단하지 마세요.\n"
             "- 이미지 선지의 파일명, 백틱, 캡션, OCR성 텍스트를 근거로 표현 오류를 만들지 마세요.\n"
             "- 이미지 선지가 있는 문제는 해설의 번호 구조와 문장 형식만 확인하고, 이미지 내용의 정오는 내용 검수로만 판단하세요.\n"
-            "- 이미지는 내용 검수에 사용하지 말고, 필요한 경우 해설 구조 확인 참고용으로만 사용하세요.\n"
+            "- 형식 검수에서는 이미지의 내용 정오를 판단하지 말고, 필요한 경우 해설 구조 확인 참고용으로만 사용하세요.\n"
+            "- 단, 내용 검수 항목이 함께 선택된 경우 이미지의 실제 내용 판단은 위 [내용 검수 추가 지시]를 우선 적용하세요.\n"
         )
 
     if not extra_instruction_parts:
@@ -555,7 +463,11 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
     needs_explanation_image_review = (
         mode in {"content", "format"}
         or review_checks is None
+        or content_checks.get("explanation_logic")
+        or content_checks.get("choice_explanation_match")
         or content_checks.get("expression_error")
+        or content_checks.get("image_validation")
+        or format_checks.get("long_explanation_manual_check")
     )
 
     include_question_images = bool(question_items and needs_given_image_review)
@@ -663,12 +575,42 @@ def parse_review_response(text: str, question_id: str, mode: str, fallback_issue
         }
 
 
+VALID_REVIEW_ISSUE_TYPES = {
+    "문제 성립 오류",
+    "정답 불일치",
+    "해설 내용 오류",
+    "선지-해설 불일치",
+    "표현/렌더링 오류",
+    "키워드 오류",
+    "기타 내용 오류",
+    "해설 시작 형식 오류",
+    "선지별 해설 누락",
+    "선지 해설 형식 오류",
+    "정답 문장 중복",
+    "결론 누락",
+    "최종 문장 형식 오류",
+    "기타 형식 오류",
+    "긴 해설 수동 검토 필요",
+}
+
+
 def is_false_positive_normal_issue(issue: dict) -> bool:
-    text = (
-        str(issue.get("type", "")) + " " +
-        str(issue.get("reason", "")) + " " +
-        str(issue.get("suggestion", ""))
-    )
+    issue_type = str(issue.get("type", "")).strip()
+    reason = str(issue.get("reason", ""))
+    suggestion = str(issue.get("suggestion", ""))
+    text = f"{issue_type} {reason} {suggestion}"
+
+    # 실제 허용 오류유형이면 정상 판단 문구가 일부 섞여 있어도 제거하지 않습니다.
+    # 예: "정답은 올바르지만 해설이 틀림" 같은 내용 오류를 보존합니다.
+    if issue_type in VALID_REVIEW_ISSUE_TYPES:
+        normal_type_phrases = [
+            "오류 없음",
+            "정상",
+            "해당 없음",
+            "문제 없음",
+            "문제 성립 오류 없음",
+        ]
+        return any(p in issue_type for p in normal_type_phrases)
 
     normal_phrases = [
         "오류는 없습니다",
@@ -677,38 +619,16 @@ def is_false_positive_normal_issue(issue: dict) -> bool:
         "문제는 없습니다",
         "이상 없습니다",
         "정상입니다",
-        "정상입니다.",
         "일치합니다",
-        "일치하므로",
         "불일치는 없습니다",
         "불일치가 없습니다",
         "해당 없음",
-        "해당 없음으로 보입니다",
         "수정할 필요 없습니다",
-        "수정할 필요는 없습니다",
         "유지해도 됩니다",
         "문제 없어 보입니다",
-        "문제는 없어 보입니다",
-        "형식상 문제는 없어 보입니다",
-        "확인 가능한 형식 오류는 없습니다",
         "확인 가능한 오류는 없습니다",
         "오류로 판단하지 않습니다",
         "오류로 보지 않습니다",
-        "문제 성립 오류 없음",
-        "문제 성립 오류는 없습니다",
-        "문제 성립 오류가 없습니다",
-        "문제 성립 오류는 해소된다",
-        "문제 성립 오류가 아니다",
-        "문제 성립 오류로 판단하지 않습니다",
-        "문제 성립 오류로 보지 않습니다",
-        "문제 성립에는 문제가 없음",
-        "문제 성립에는 문제가 없습니다",
-        "이미지가 정상 첨부되어 있다",
-        "이미지가 정상적으로 렌더링되어 있다",
-        "정답 검증이 가능하다",
-        "정답이 올바르다",
-        "정답은 올바르다",
-        "권장",
     ]
 
     return any(p in text for p in normal_phrases)
@@ -756,7 +676,7 @@ def normalize_issue_key(issue: dict) -> str:
         return "문체 오류"
 
     # 정상 판단으로 작성된 issue 제거용 key
-    if any(w in text for w in [
+    if issue_type not in VALID_REVIEW_ISSUE_TYPES and any(w in text for w in [
         "오류는 없습니다",
         "형식 오류는 없습니다",
         "내용 오류는 없습니다",
@@ -778,7 +698,6 @@ def normalize_issue_key(issue: dict) -> str:
         "확인 가능한 오류는 없습니다",
     ]):
         return "정상 판단"
-
     return f"{issue_type}|{reason[:50]}"
 
 
@@ -853,14 +772,22 @@ def filter_no_issue_entries(reviewed):
     검수 항목에서 '오류 없음/정상 판단' 항목을 제거합니다.
     """
     def is_no_issue(issue):
-        text = (
-            str(issue.get("type", "")) + " " +
-            str(issue.get("reason", "")) + " " +
-            str(issue.get("suggestion", ""))
-        )
+        issue_type = str(issue.get("type", "")).strip()
+        reason = str(issue.get("reason", ""))
+        suggestion = str(issue.get("suggestion", ""))
+        text = f"{issue_type} {reason} {suggestion}"
+
+        if issue_type in VALID_REVIEW_ISSUE_TYPES:
+            normal_type_phrases = [
+                "오류 없음",
+                "정상",
+                "해당 없음",
+                "문제 없음",
+                "문제 성립 오류 없음",
+            ]
+            return any(p in issue_type for p in normal_type_phrases)
 
         no_issue_phrases = [
-            "문제 성립 오류 없음",
             "오류 없음",
             "오류는 없습니다",
             "형식 오류는 없습니다",
@@ -871,23 +798,8 @@ def filter_no_issue_entries(reviewed):
             "불일치는 없습니다",
             "불일치가 없습니다",
             "수정할 필요 없습니다",
-            "수정할 필요는 없습니다",
             "오류로 판단하지 않습니다",
             "오류로 보지 않습니다",
-            "문제 성립 오류는 없습니다",
-            "문제 성립 오류가 없습니다",
-            "문제 성립 오류는 해소된다",
-            "문제 성립 오류가 아니다",
-            "문제 성립 오류로 판단하지 않습니다",
-            "문제 성립 오류로 보지 않습니다",
-            "문제 성립에는 문제가 없음",
-            "문제 성립에는 문제가 없습니다",
-            "이미지가 정상 첨부되어 있다",
-            "이미지가 정상적으로 렌더링되어 있다",
-            "정답 검증이 가능하다",
-            "정답이 올바르다",
-            "정답은 올바르다",
-            "권장",
         ]
 
         return any(p in text for p in no_issue_phrases)
@@ -1020,15 +932,23 @@ def add_explanation_manual_review_issue(
     if capture_mode in {"not_needed", "not_attempted"}:
         return reviewed
 
+    capture_mode_reason_map = {
+        "too_long_after_zoom": "해설이 화면에 한 번에 들어오지 않아 자동 캡처만으로 전체 해설을 확인하기 어렵습니다.",
+        "skipped": "해설 캡처 전 화면 상태를 안정적으로 맞추지 못해 자동 캡처를 건너뛰었습니다.",
+        "failed": "해설 영역을 자동으로 캡처하지 못했습니다.",
+    }
+
+    reason_text = capture_mode_reason_map.get(
+        capture_mode,
+        "해설 자동 캡처 결과 수동 확인이 필요한 상태로 기록되었습니다.",
+    )
+
     issue = {
         "type": "긴 해설 수동 검토 필요",
-        "reason": (
-            f"해설 캡처 결과 capture_mode='{capture_mode}', "
-            f"needs_manual_review={needs_manual_review}로 기록되어 "
-            "해설 전체의 수식/표현/렌더링 상태를 자동으로 확정 검수하기 어렵습니다."
-        ),
+        "reason": reason_text,
         "suggestion": (
-            "관리자 화면에서 해설 전체 표시 여부와 수식/표/렌더링 깨짐 여부를 수동으로 확인하세요."
+            "관리자 화면에서 해설 전체가 누락 없이 표시되는지, "
+            "수식·표·문자·렌더링이 깨지지 않았는지 직접 확인하세요."
         ),
     }
 
@@ -1124,6 +1044,52 @@ def review_one_with_retries(
 
     raise RuntimeError(f"문제별 API 재시도 {max_retries}회 실패: {last_error}") from last_error
 
+
+def review_single_raw_file_task(
+    raw_file: Path,
+    api_key: str,
+    selected_prompt: str,
+    selected_checks: dict[str, Any],
+    run_content: bool,
+    run_format: bool,
+    cancel_checker=None,
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    """
+    병렬 처리용 단일 문제 검수 함수입니다.
+    여기서는 API 호출까지만 처리하고,
+    reviewed_json 저장, issue_rows 정리, xlsx 저장은 메인 루프에서 처리합니다.
+    """
+    check_cancel(cancel_checker)
+
+    with open(raw_file, "r", encoding="utf-8") as f:
+        question_data = json.load(f)
+
+    if not run_content and not run_format:
+        selected_result = make_empty_review_result(
+            question_data.get("question_id", "")
+        )
+    else:
+        client = OpenAI(
+            api_key=api_key,
+            timeout=120,
+        )
+
+        fallback_area = "content" if run_content else "format"
+
+        selected_result = review_one_with_retries(
+            client,
+            selected_prompt,
+            question_data,
+            mode="selected",
+            review_checks=selected_checks,
+            fallback_issue_area=fallback_area,
+        )
+
+    check_cancel(cancel_checker)
+
+    return raw_file, question_data, selected_result
+
+
 def question_no_from_filename(path: Path):
     try:
         return int(path.stem.split("_")[-1])
@@ -1136,10 +1102,8 @@ def configure_review_dirs(
     raw_dir: str | Path | None = None,
     reviewed_dir: str | Path | None = None,
     issue_xlsx_path: str | Path | None = None,
-    formula_xlsx_path: str | Path | None = None,
 ):
-    """API 실행 시 job_id별 raw/reviewed/xlsx 경로를 사용하도록 전역 경로를 변경합니다."""
-    global RAW_DIR, REVIEWED_DIR, ISSUE_XLSX_PATH, FORMULA_XLSX_PATH
+    global RAW_DIR, REVIEWED_DIR, ISSUE_XLSX_PATH
 
     if raw_dir is not None:
         RAW_DIR = Path(raw_dir).resolve()
@@ -1147,20 +1111,16 @@ def configure_review_dirs(
         REVIEWED_DIR = Path(reviewed_dir).resolve()
     if issue_xlsx_path is not None:
         ISSUE_XLSX_PATH = Path(issue_xlsx_path).resolve()
-    if formula_xlsx_path is not None:
-        FORMULA_XLSX_PATH = Path(formula_xlsx_path).resolve()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     REVIEWED_DIR.mkdir(parents=True, exist_ok=True)
     ISSUE_XLSX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    FORMULA_XLSX_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def review_raw_files(
     raw_files: list[str | Path] | None = None,
     reviewed_dir: str | Path | None = None,
     issue_xlsx_path: str | Path | None = None,
-    formula_xlsx_path: str | Path | None = None,
     write_excel: bool = True,
     cancel_checker=None,
     review_checks: dict[str, Any] | None = None,
@@ -1179,7 +1139,6 @@ def review_raw_files(
         raw_dir=RAW_DIR,
         reviewed_dir=reviewed_dir,
         issue_xlsx_path=issue_xlsx_path,
-        formula_xlsx_path=formula_xlsx_path,
     )
 
     load_dotenv(ROOT / ".env")
@@ -1188,18 +1147,12 @@ def review_raw_files(
     if not api_key:
         raise RuntimeError("환경변수 CHATGPT_API_KEY가 필요합니다.")
 
-    client = OpenAI(
-        api_key=api_key,
-        timeout=120,
-    )
-
     selected_checks = get_selected_review_checks(review_checks)
     selected_prompt = build_review_prompt(selected_checks)
     run_content = should_run_content_review(selected_checks)
     run_format = should_run_format_review(selected_checks)
 
     issue_rows: list[dict[str, Any]] = []
-    formula_rows: list[dict[str, Any]] = []
     reviewed_results: list[dict[str, Any]] = []
     skipped_errors: list[dict[str, Any]] = []
 
@@ -1214,31 +1167,96 @@ def review_raw_files(
         print("[정보] 검수할 raw JSON이 없습니다.")
         return []
 
+    review_payloads: dict[Path, tuple[dict[str, Any], dict[str, Any]]] = {}
+    error_payloads: dict[Path, Exception] = {}
+
     try:
+        worker_count = max(1, min(MAX_REVIEW_WORKERS, len(raw_paths)))
+
+        if worker_count == 1:
+            for raw_file in raw_paths:
+                try:
+                    _, question_data, selected_result = review_single_raw_file_task(
+                        raw_file=raw_file,
+                        api_key=api_key,
+                        selected_prompt=selected_prompt,
+                        selected_checks=selected_checks,
+                        run_content=run_content,
+                        run_format=run_format,
+                        cancel_checker=cancel_checker,
+                    )
+                    review_payloads[raw_file] = (question_data, selected_result)
+
+                except Exception as e:
+                    error_payloads[raw_file] = e
+
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(
+                        review_single_raw_file_task,
+                        raw_file,
+                        api_key,
+                        selected_prompt,
+                        selected_checks,
+                        run_content,
+                        run_format,
+                        cancel_checker,
+                    ): raw_file
+                    for raw_file in raw_paths
+                }
+
+                for future in as_completed(future_map):
+                    raw_file = future_map[future]
+
+                    try:
+                        _, question_data, selected_result = future.result()
+                        review_payloads[raw_file] = (question_data, selected_result)
+
+                    except Exception as e:
+                        error_payloads[raw_file] = e
+
         for raw_file in raw_paths:
             check_cancel(cancel_checker)
 
-            with open(raw_file, "r", encoding="utf-8") as f:
-                question_data = json.load(f)
+            if raw_file in error_payloads:
+                e = error_payloads[raw_file]
+
+                if is_cancel_exception(e):
+                    raise
+
+                if is_fatal_review_error(e):
+                    print(f"[치명적 API/설정 오류] {raw_file.name}: {e}")
+                    raise e
+
+                consecutive_failures += 1
+
+                error_item = {
+                    "file_name": raw_file.name,
+                    "question_id": "",
+                    "question_no": "",
+                    "error_type": e.__class__.__name__,
+                    "error_message": str(e),
+                    "consecutive_failures": consecutive_failures,
+                }
+                skipped_errors.append(error_item)
+
+                print(
+                    f"[SKIP API 오류] {raw_file.name}: {e} "
+                    f"/ 연속 실패 {consecutive_failures}개"
+                )
+
+                if consecutive_failures >= MAX_CONSECUTIVE_REVIEW_FAILURES:
+                    raise RuntimeError(
+                        f"API 검수 오류가 연속 {MAX_CONSECUTIVE_REVIEW_FAILURES}개 발생하여 "
+                        f"작업을 중단합니다. 마지막 오류: {raw_file.name} / {e}"
+                    ) from e
+
+                continue
+
+            question_data, selected_result = review_payloads[raw_file]
 
             try:
-                check_cancel(cancel_checker)
-
-                if not run_content and not run_format:
-                    selected_result = make_empty_review_result(
-                        question_data.get("question_id", "")
-                    )
-                else:
-                    fallback_area = "content" if run_content else "format"
-                    selected_result = review_one_with_retries(
-                        client,
-                        selected_prompt,
-                        question_data,
-                        mode="selected",
-                        review_checks=selected_checks,
-                        fallback_issue_area=fallback_area,
-                    )
-
                 check_cancel(cancel_checker)
 
                 merged = merge_selected_review_result(
@@ -1331,45 +1349,20 @@ def review_raw_files(
 
                 print(f"[ISSUE XLSX 기록] {raw_file.name}")
 
-            data = question_data.get("data", {}) or {}
-            has_formula, formula_reason = has_formula_explanation(data)
-
-            if has_formula:
-                expl_images = data.get("explanation_images", []) or []
-                expl_meta = data.get("explanation_capture_meta", {}) or {}
-
-                formula_rows.append({
-                    "question_id": merged.get("question_id", ""),
-                    "file_name": raw_file.name,
-                    "question_no": merged.get("question_no", ""),
-                    "subject_name": merged.get("subject_name", ""),
-                    "sub_title": merged.get("sub_title", ""),
-                    "has_formula_explanation": True,
-                    "explanation_image_count": len(expl_images),
-                    "capture_mode": expl_meta.get("capture_mode", ""),
-                    "needs_manual_review": expl_meta.get("needs_manual_review", ""),
-                    "explanation_images": " | ".join(map(str, expl_images)),
-                    "formula_reason": formula_reason,
-                })
-
-                print(f"[FORMULA 행 추가] {raw_file.name} / {formula_reason}")
-
             print(
                 f"[REVIEW 저장] {out_path.name} "
                 f"/ issue={merged['summary'].get('has_issue')} "
                 f"/ issue_count={merged['summary'].get('issue_count')}"
             )
 
-            time.sleep(0.1)
-
     finally:
         save_review_errors(skipped_errors)
 
-        if write_excel and reviewed_results:
+        if write_excel:
             save_issue_rows_to_xlsx(issue_rows)
-            save_formula_rows_to_xlsx(formula_rows)
 
     return reviewed_results
+
 
 def check_cancel(cancel_checker=None):
     if cancel_checker is not None:
@@ -1390,7 +1383,6 @@ def review_job_dir(
         raw_dir=raw_dir,
         reviewed_dir=reviewed_dir,
         issue_xlsx_path=job_dir / "chatgpt.xlsx",
-        formula_xlsx_path=job_dir / "formula.xlsx",
     )
 
     raw_files = sorted(raw_dir.glob("*.json"), key=question_no_from_filename)
@@ -1398,7 +1390,6 @@ def review_job_dir(
         raw_files=raw_files,
         reviewed_dir=reviewed_dir,
         issue_xlsx_path=job_dir / "chatgpt.xlsx",
-        formula_xlsx_path=job_dir / "formula.xlsx",
         write_excel=write_excel,
         cancel_checker=cancel_checker,
         review_checks=review_checks,
