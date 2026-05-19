@@ -27,6 +27,7 @@ from prompt_rules import (
     FORMAT_QUOTE_RULES,
     FORMAT_DUPLICATE_ANSWER,
     FORMAT_LONG_EXPLANATION,
+    PT_TEACHER_TIP_VALIDATION,
 )
 
 
@@ -49,8 +50,11 @@ DEFAULT_REVIEW_CHECKS: Dict[str, Dict[str, bool]] = {
         "conclusion_sentence": True,
         "quote_rules": True,
         "duplicate_answer_sentence": True,
-        "markdown_error": True,
+        "markdown_error": False,
         "long_explanation_manual_check": True,
+    },
+    "pt_teacher_tip": {
+        "pt_teacher_tip_validation": True,
     },
 }
 
@@ -60,6 +64,7 @@ CHECK_PRESETS: Dict[str, Dict[str, Dict[str, bool]]] = {
     "content_only": {
         "content": {key: True for key in DEFAULT_REVIEW_CHECKS["content"]},
         "format": {key: False for key in DEFAULT_REVIEW_CHECKS["format"]},
+        "pt_teacher_tip": {"pt_teacher_tip_validation": False},
     },
     "format_only": {
         "content": {key: False for key in DEFAULT_REVIEW_CHECKS["content"]},
@@ -67,6 +72,7 @@ CHECK_PRESETS: Dict[str, Dict[str, Dict[str, bool]]] = {
             **{key: True for key in DEFAULT_REVIEW_CHECKS["format"]},
             "markdown_error": False,
         },
+        "pt_teacher_tip": {"pt_teacher_tip_validation": False},
     },
     "answer_only": {
         "content": {
@@ -79,6 +85,7 @@ CHECK_PRESETS: Dict[str, Dict[str, Dict[str, bool]]] = {
             "keyword_validation": False,
         },
         "format": {key: False for key in DEFAULT_REVIEW_CHECKS["format"]},
+        "pt_teacher_tip": {"pt_teacher_tip_validation": False},
     },
     "explanation_only": {
         "content": {
@@ -99,17 +106,25 @@ CHECK_PRESETS: Dict[str, Dict[str, Dict[str, bool]]] = {
             "conclusion_sentence": True,
             "quote_rules": True,
             "duplicate_answer_sentence": True,
-            "markdown_error": True,
+            "markdown_error": False,
             "long_explanation_manual_check": True,
         },
+        "pt_teacher_tip": {"pt_teacher_tip_validation": False},
+    },
+    "pt_teacher_tip_only": {
+        "content": {key: False for key in DEFAULT_REVIEW_CHECKS["content"]},
+        "format": {key: False for key in DEFAULT_REVIEW_CHECKS["format"]},
+        "pt_teacher_tip": {"pt_teacher_tip_validation": True},
     },
     "cancel": {
         "content": {key: False for key in DEFAULT_REVIEW_CHECKS["content"]},
         "format": {key: False for key in DEFAULT_REVIEW_CHECKS["format"]},
+        "pt_teacher_tip": {"pt_teacher_tip_validation": False},
     },
     "none": {
         "content": {key: False for key in DEFAULT_REVIEW_CHECKS["content"]},
         "format": {key: False for key in DEFAULT_REVIEW_CHECKS["format"]},
+        "pt_teacher_tip": {"pt_teacher_tip_validation": False},
     },
 }
 
@@ -138,7 +153,7 @@ VISIBLE_CHECK_GROUPS: Dict[str, Dict[str, Any]] = {
     "expression_rendering": {
         "group": "content",
         "label": "표현/렌더링 오류",
-        "source_keys": [("content", "expression_error"), ("format", "markdown_error")],
+        "source_keys": [("content", "expression_error")],
         "allowed_issue_types": ["표현/렌더링 오류"],
     },
     "keyword_validation": {
@@ -183,6 +198,12 @@ VISIBLE_CHECK_GROUPS: Dict[str, Dict[str, Any]] = {
         "source_keys": [("format", "long_explanation_manual_check")],
         "allowed_issue_types": ["긴 해설 수동 검토 필요"],
     },
+    "pt_teacher_tip_validation": {
+        "group": "pt_teacher_tip",
+        "label": "PT쌤 합격팁 검수",
+        "source_keys": [("pt_teacher_tip", "pt_teacher_tip_validation")],
+        "allowed_issue_types": ["PT쌤 합격팁 오류"],
+    },
 }
 
 
@@ -190,6 +211,7 @@ def _copy_checks(checks: Dict[str, Dict[str, bool]]) -> Dict[str, Dict[str, bool
     return {
         "content": dict(checks.get("content", {})),
         "format": dict(checks.get("format", {})),
+        "pt_teacher_tip": dict(checks.get("pt_teacher_tip", {})),
     }
 
 
@@ -198,7 +220,7 @@ def merge_review_checks(user_checks: Dict[str, Any] | None = None) -> Dict[str, 
     프론트에서 전달한 checks를 기본값과 병합합니다.
 
     지원 입력:
-    1) {"content": {...}, "format": {...}}
+    1) {"content": {...}, "format": {...}, "pt_teacher_tip": {...}}
     2) {"preset": "format_only"}
     3) None -> 전체 검수
     """
@@ -211,7 +233,7 @@ def merge_review_checks(user_checks: Dict[str, Any] | None = None) -> Dict[str, 
     else:
         base = _copy_checks(DEFAULT_REVIEW_CHECKS)
 
-    for group in ("content", "format"):
+    for group in ("content", "format", "pt_teacher_tip"):
         group_value = user_checks.get(group)
         if not isinstance(group_value, dict):
             continue
@@ -235,6 +257,11 @@ def should_run_content_review(checks: Dict[str, Any] | None = None) -> bool:
 def should_run_format_review(checks: Dict[str, Any] | None = None) -> bool:
     merged = merge_review_checks(checks)
     return any(merged.get("format", {}).values())
+
+
+def should_run_pt_teacher_tip_review(checks: Dict[str, Any] | None = None) -> bool:
+    merged = merge_review_checks(checks)
+    return any(merged.get("pt_teacher_tip", {}).values())
 
 
 def is_check_enabled(checks: Dict[str, Any] | None, group: str, key: str) -> bool:
@@ -269,6 +296,7 @@ def get_review_scope_summary(checks: Dict[str, Any] | None = None) -> str:
     all_ids = set(VISIBLE_CHECK_GROUPS.keys())
     content_ids = {check_id for check_id, meta in VISIBLE_CHECK_GROUPS.items() if meta["group"] == "content"}
     format_ids = {check_id for check_id, meta in VISIBLE_CHECK_GROUPS.items() if meta["group"] == "format"}
+    pt_tip_ids = {check_id for check_id, meta in VISIBLE_CHECK_GROUPS.items() if meta["group"] == "pt_teacher_tip"}
 
     if selected_ids == all_ids:
         return "전체 검수"
@@ -276,6 +304,8 @@ def get_review_scope_summary(checks: Dict[str, Any] | None = None) -> str:
         return "내용 검수"
     if selected_ids == format_ids:
         return "형식 검수"
+    if selected_ids == pt_tip_ids:
+        return "PT쌤 합격팁 검수"
     return "부분 검수"
 
 
@@ -345,6 +375,7 @@ def build_review_prompt(checks: Dict[str, Any] | None = None) -> str:
     merged = merge_review_checks(checks)
     content_checks = merged["content"]
     format_checks = merged["format"]
+    pt_teacher_tip_checks = merged.get("pt_teacher_tip", {})
     selected_visible_checks = get_selected_visible_checks(checks)
 
     parts: list[str] = [BASE_PROMPT]
@@ -377,6 +408,9 @@ def build_review_prompt(checks: Dict[str, Any] | None = None) -> str:
         if content_checks.get("keyword_validation"):
             parts.append(CONTENT_KEYWORD_VALIDATION)
 
+    if any(pt_teacher_tip_checks.values()):
+        parts.append(PT_TEACHER_TIP_VALIDATION)
+
     if any(format_checks.values()):
         parts.append(FORMAT_HEADER)
 
@@ -401,7 +435,11 @@ def build_review_prompt(checks: Dict[str, Any] | None = None) -> str:
         if format_checks.get("long_explanation_manual_check"):
             parts.append(FORMAT_LONG_EXPLANATION)
 
-    if not any(content_checks.values()) and not any(format_checks.values()):
+    if (
+        not any(content_checks.values())
+        and not any(format_checks.values())
+        and not any(pt_teacher_tip_checks.values())
+    ):
         parts.append(
             """
 [검수 항목 없음]

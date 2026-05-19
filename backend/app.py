@@ -6,10 +6,16 @@ from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from collect_api import collect_from_target
 from chatgpt_api import review_job_dir
-from db_api import app as question_api_app
+from db_api import (
+    app as question_api_app,
+    engine as question_db_engine,
+    IS_POSTGRES,
+    now_text as db_now_text,
+)
 
 APP_ROOT = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent)).resolve()
 JOBS_DIR = Path(os.getenv("JOBS_DIR", APP_ROOT / "jobs")).resolve()
@@ -321,6 +327,199 @@ def normalize_issues(reviewed: dict[str, Any]) -> list[dict[str, Any]]:
 
     return issues
 
+
+def first_question_image_url(data: dict[str, Any]) -> str:
+    for item in data.get("image_elements", []) or []:
+        if item.get("location") == "question":
+            return str(item.get("saved_path") or "")
+    return ""
+
+
+def choice_image_url(data: dict[str, Any], choice_no: int) -> str:
+    target_caption = f"choice_{choice_no}"
+
+    for item in data.get("image_elements", []) or []:
+        if item.get("location") != "choice":
+            continue
+
+        caption = str(item.get("caption_or_near_text") or "")
+        if caption == target_caption:
+            return str(item.get("saved_path") or "")
+
+    return ""
+
+
+def get_choice_text(choices: list[Any], index: int) -> str:
+    if index < 0 or index >= len(choices):
+        return ""
+    return str(choices[index] or "")
+
+
+def question_no_from_raw_file(path: Path) -> int:
+    try:
+        value = path.stem.split("_")[-1]
+        return int(float(value))
+    except Exception:
+        return 999999999
+
+
+def insert_collected_raw_to_questions_db(
+    job_id: str,
+    job_path: Path,
+    target: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """
+    collect_api.py가 만든 job/raw/*.json을 questions 테이블에 임시 문제로 저장합니다.
+
+    options.save_collected_to_db=true일 때만 실행합니다.
+    idx/site_question_id/exam_unique_no를 모르는 상태에서도 DB가 새 id를 만들고,
+    그 id를 site_question_id처럼 target["questions"]에 붙여 기존 결과 반영 흐름을 사용합니다.
+    """
+    raw_dir = job_path / "raw"
+
+    if not raw_dir.exists():
+        return []
+
+    raw_files = sorted(raw_dir.glob("*.json"), key=question_no_from_raw_file)
+
+    if not raw_files:
+        return []
+
+    temp_exam_unique_no = str(target.get("exam_unique_no") or f"TEMP_{job_id}")
+    inserted_questions: list[dict[str, Any]] = []
+
+    columns = [
+        "course_name",
+        "upload_file",
+        "exam_unique_no",
+        "cd_value",
+        "subject_name",
+        "chapter",
+        "section",
+        "learning_goal",
+        "question_no",
+        "question",
+        "view_text",
+        "image_url",
+        "answer",
+        "score",
+        "choice1",
+        "choice2",
+        "choice3",
+        "choice4",
+        "choice1_image_url",
+        "choice2_image_url",
+        "choice3_image_url",
+        "choice4_image_url",
+        "explanation",
+        "keywords",
+        "review_status",
+        "error_type",
+        "reason",
+        "suggestion",
+        "reviewer",
+        "reviewed_at",
+        "reflect_status",
+        "review_check_labels",
+        "review_scope_summary",
+        "review_check_history",
+        "raw_json",
+        "created_at",
+        "updated_at",
+    ]
+
+    insert_sql = f"""
+        INSERT INTO questions ({", ".join(columns)})
+        VALUES ({", ".join([f":{col}" for col in columns])})
+    """
+
+    if IS_POSTGRES:
+        insert_sql += " RETURNING id"
+
+    with question_db_engine.begin() as conn:
+        for raw_file in raw_files:
+            with open(raw_file, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+
+            data = raw.get("data", {}) or {}
+            choices = data.get("choices", []) or []
+
+            question_no = raw.get("question_no") or data.get("question_no") or ""
+            subject_name = raw.get("subject_name") or target.get("subject_name") or ""
+            sub_title = (
+                raw.get("sub_title")
+                or target.get("subtype_name")
+                or target.get("sub_title")
+                or ""
+            )
+            set_name = raw.get("set_name") or target.get("set_name") or ""
+            now = db_now_text()
+
+            keywords = data.get("keywords") or ""
+            if isinstance(keywords, list):
+                keywords = ", ".join(str(item) for item in keywords if str(item).strip())
+            else:
+                keywords = str(keywords or "")
+
+            params = {
+                "course_name": raw.get("course_name") or target.get("course_name") or "",
+                "upload_file": f"collect:{job_id}",
+                "exam_unique_no": temp_exam_unique_no,
+                "cd_value": str(data.get("cd_value") or raw.get("cd_value") or target.get("cd_value") or ""),
+                "subject_name": subject_name,
+                "chapter": "",
+                "section": "",
+                "learning_goal": "",
+                "question_no": str(question_no),
+                "question": str(data.get("body") or ""),
+                "view_text": str(data.get("extra_text") or ""),
+                "image_url": first_question_image_url(data),
+                "answer": str(data.get("answer") or ""),
+                "score": str(data.get("score") or ""),
+                "choice1": get_choice_text(choices, 0),
+                "choice2": get_choice_text(choices, 1),
+                "choice3": get_choice_text(choices, 2),
+                "choice4": get_choice_text(choices, 3),
+                "choice1_image_url": choice_image_url(data, 1),
+                "choice2_image_url": choice_image_url(data, 2),
+                "choice3_image_url": choice_image_url(data, 3),
+                "choice4_image_url": choice_image_url(data, 4),
+                "explanation": str(data.get("explanation") or ""),
+                "keywords": keywords,
+                "review_status": "미검수",
+                "error_type": "",
+                "reason": "",
+                "suggestion": "",
+                "reviewer": "admin",
+                "reviewed_at": "",
+                "reflect_status": "미반영",
+                "review_check_labels": "",
+                "review_scope_summary": "",
+                "review_check_history": "",
+                "raw_json": json.dumps(raw, ensure_ascii=False, default=str),
+                "created_at": now,
+                "updated_at": now,
+            }
+
+            result = conn.execute(text(insert_sql), params)
+
+            if IS_POSTGRES:
+                inserted_id = result.scalar_one()
+            else:
+                inserted_id = result.lastrowid
+
+            inserted_questions.append({
+                "site_question_id": inserted_id,
+                "exam_unique_no": temp_exam_unique_no,
+                "question_no": str(question_no),
+                "set_name": set_name,
+                "subject_name": subject_name,
+                "subtype_name": sub_title,
+            })
+
+    return inserted_questions
+
+
 def build_site_result(job_id: str, target: dict[str, Any], reviewed_questions: list[dict[str, Any]]) -> dict[str, Any]:
     site_meta_map = get_question_site_meta_map(target)
     include_raw_data = bool((target.get("options") or {}).get("include_raw_data", False))
@@ -388,6 +587,7 @@ def build_site_result(job_id: str, target: dict[str, Any], reviewed_questions: l
                 "explanation_images": data.get("explanation_images", []),
                 "explanation_capture_meta": data.get("explanation_capture_meta", {}),
                 "question_image_capture_meta": data.get("question_image_capture_meta", {}),
+                "pt_teacher_tip": data.get("pt_teacher_tip", {"has_tip": False}),
             }
 
         items.append(item)
@@ -443,6 +643,26 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
             headless=headless,
             cancel_checker=lambda: raise_if_cancelled(job_id),
         )
+
+        if bool(options.get("save_collected_to_db", False)):
+            raise_if_cancelled(job_id)
+
+            update_status(job_path, "saving_collected_to_db")
+
+            inserted_questions = insert_collected_raw_to_questions_db(
+                job_id=job_id,
+                job_path=job_path,
+                target=target,
+            )
+
+            if inserted_questions:
+                temp_exam_unique_no = inserted_questions[0].get("exam_unique_no") or f"TEMP_{job_id}"
+
+                target["exam_unique_no"] = temp_exam_unique_no
+                target["questions"] = inserted_questions
+
+                # 이후 result 조회/부분 실패 처리에서도 같은 target을 쓰도록 저장합니다.
+                write_json(job_path / "target.json", target)
 
         raise_if_cancelled(job_id)
 

@@ -14,6 +14,7 @@ const CONTENT_ERROR_TYPES = [
   "표현/렌더링 오류",
   "키워드 오류",
   "기타 내용 오류",
+  "PT쌤 합격팁 오류",
 ];
 
 const FORMAT_ERROR_TYPES = [
@@ -47,6 +48,7 @@ const DEFAULT_FILTERS = {
 
 const DEFAULT_REVIEW_TARGET = {
   reviewApiBase: DEFAULT_REVIEW_API_BASE,
+  targetInputMode: "mapped",
   targetMapId: "",
   targetMapIds: [],
   courseName: "",
@@ -85,6 +87,9 @@ const DEFAULT_REVIEW_CHECKS = {
     markdown_error: true,
     long_explanation_manual_check: true,
   },
+  pt_teacher_tip: {
+    pt_teacher_tip_validation: true,
+  },
 };
 
 const EMPTY_REVIEW_CHECKS = {
@@ -108,6 +113,9 @@ const EMPTY_REVIEW_CHECKS = {
     duplicate_answer_sentence: false,
     markdown_error: false,
     long_explanation_manual_check: false,
+  },
+  pt_teacher_tip: {
+    pt_teacher_tip_validation: false,
   },
 };
 
@@ -142,6 +150,9 @@ const REVIEW_CHECK_PRESETS = {
         markdown_error: true,
         long_explanation_manual_check: false,
       },
+      pt_teacher_tip: {
+        pt_teacher_tip_validation: false,
+      },
     },
   },
   formatOnly: {
@@ -165,8 +176,11 @@ const REVIEW_CHECK_PRESETS = {
         conclusion_sentence: true,
         quote_rules: true,
         duplicate_answer_sentence: true,
-        markdown_error: true,
+        markdown_error: false,
         long_explanation_manual_check: true,
+      },
+      pt_teacher_tip: {
+        pt_teacher_tip_validation: false,
       },
     },
   },
@@ -194,6 +208,9 @@ const REVIEW_CHECK_PRESETS = {
         markdown_error: false,
         long_explanation_manual_check: false,
       },
+      pt_teacher_tip: {
+        pt_teacher_tip_validation: false,
+      },
     },
   },
   explanationOnly: {
@@ -217,8 +234,40 @@ const REVIEW_CHECK_PRESETS = {
         conclusion_sentence: true,
         quote_rules: true,
         duplicate_answer_sentence: true,
-        markdown_error: true,
+        markdown_error: false,
         long_explanation_manual_check: true,
+      },
+      pt_teacher_tip: {
+        pt_teacher_tip_validation: false,
+      },
+    },
+  },
+  ptTeacherTipOnly: {
+    label: "합격팁 검수만",
+    checks: {
+      content: {
+        problem_validity: false,
+        answer_validation: false,
+        explanation_logic: false,
+        choice_explanation_match: false,
+        image_validation: false,
+        expression_error: false,
+        keyword_validation: false,
+      },
+      format: {
+        start_sentence: false,
+        choice_explanation_exists: false,
+        choice_explanation_format: false,
+        honorific_style: false,
+        negative_question: false,
+        conclusion_sentence: false,
+        quote_rules: false,
+        duplicate_answer_sentence: false,
+        markdown_error: false,
+        long_explanation_manual_check: false,
+      },
+      pt_teacher_tip: {
+        pt_teacher_tip_validation: true,
       },
     },
   },
@@ -254,6 +303,14 @@ const REVIEW_CHECK_GROUPS = {
       label: "키워드 검수",
       keys: ["keyword_validation"],
       description: "키워드가 문제의 핵심 개념과 맞는지, 누락되지 않았는지 확인합니다.",
+    },
+  },
+
+  pt_teacher_tip: {
+    pt_teacher_tip_validation: {
+      label: "PT쌤 합격팁 검수",
+      keys: ["pt_teacher_tip_validation"],
+      description: "개념 난이도, 정답률, 유형, 선지별 정답률, 출제 경향, 분석 내용이 현재 문제와 맞는지 확인합니다.",
     },
   },
 
@@ -298,6 +355,7 @@ const REVIEW_CONTENT_CHECK_DESCRIPTIONS = {
   image_validation: "문제/선지/해설 이미지가 깨지거나 누락되어 풀이에 지장이 있는지 확인합니다.",
   expression_error: "수식, 특수문자, 글리프, Markdown 잔여 문법 등 표시 깨짐을 확인합니다.",
   keyword_validation: "키워드가 문제의 핵심 개념과 일치하는지, 핵심 키워드가 누락되었거나 지나치게 넓은지 확인합니다.",
+  pt_teacher_tip_validation: "PT쌤 합격팁의 난이도, 정답률, 유형, 선지별 정답률, 출제 경향, 분석 내용이 문제와 맞는지 확인합니다.",
 };
 
 const REVIEW_FORMAT_CHECK_DESCRIPTIONS = {
@@ -443,25 +501,29 @@ function uniqueLabels(labels) {
 function getAllReviewLabelGroups() {
   const content = Object.values(REVIEW_CHECK_GROUPS.content).map((item) => item.label);
   const format = Object.values(REVIEW_CHECK_GROUPS.format).map((item) => item.label);
-  return { content, format, all: [...content, ...format] };
+  const ptTeacherTip = Object.values(REVIEW_CHECK_GROUPS.pt_teacher_tip).map((item) => item.label);
+  return { content, format, ptTeacherTip, all: [...content, ...format, ...ptTeacherTip] };
 }
 
 function makeReviewScopeSummary(labels) {
   const normalized = uniqueLabels(labels);
   if (normalized.length === 0) return "-";
 
-  const { content, format, all } = getAllReviewLabelGroups();
+  const { content, format, ptTeacherTip, all } = getAllReviewLabelGroups();
   const hasAllContent = content.every((label) => normalized.includes(label));
   const hasAllFormat = format.every((label) => normalized.includes(label));
+  const hasAllPtTeacherTip = ptTeacherTip.every((label) => normalized.includes(label));
   const hasAll = all.every((label) => normalized.includes(label));
 
   if (hasAll) return "전체 검수";
 
   const remainingContent = content.filter((label) => normalized.includes(label));
   const remainingFormat = format.filter((label) => normalized.includes(label));
+  const remainingPtTeacherTip = ptTeacherTip.filter((label) => normalized.includes(label));
 
-  if (hasAllContent && remainingFormat.length === 0) return "내용 검수";
-  if (hasAllFormat && remainingContent.length === 0) return "형식 검수";
+  if (hasAllContent && remainingFormat.length === 0 && remainingPtTeacherTip.length === 0) return "내용 검수";
+  if (hasAllFormat && remainingContent.length === 0 && remainingPtTeacherTip.length === 0) return "형식 검수";
+  if (hasAllPtTeacherTip && remainingContent.length === 0 && remainingFormat.length === 0) return "PT쌤 합격팁 검수";
 
   if (hasAllContent) {
     return ["내용 검수", ...remainingFormat].join(", ");
@@ -578,6 +640,7 @@ function toggleReviewGroup(setReviewChecks, group, groupKey) {
       ...prev,
       content: { ...prev.content },
       format: { ...prev.format },
+      pt_teacher_tip: { ...prev.pt_teacher_tip },
     };
 
     checkItems.forEach(({ group: itemGroup, key }) => {
@@ -592,10 +655,17 @@ function toggleReviewGroup(setReviewChecks, group, groupKey) {
 function normalizeReviewChecksForPayload(checks) {
   const next = cloneReviewChecks(checks);
 
-  // 화면에는 "표현/렌더링 오류" 1개 항목만 보이게 하고,
-  // 실제 AI 검수 payload에서는 기존 호환용 markdown_error를 같은 값으로 맞춥니다.
+  if (!next.content) next.content = {};
   if (!next.format) next.format = {};
-  next.format.markdown_error = !!next.content?.expression_error;
+
+  // 기존 호환용으로 format.markdown_error가 들어와도
+  // 실제 검수는 내용 오류인 content.expression_error로 이동합니다.
+  if (next.format.markdown_error) {
+    next.content.expression_error = true;
+  }
+
+  // markdown_error는 더 이상 형식 검수로 보내지 않습니다.
+  next.format.markdown_error = false;
 
   return next;
 }
@@ -1460,7 +1530,22 @@ function App() {
     const { name, value, type, checked } = event.target;
     setReviewCurrentPage(1);
 
-    if (name === "courseName") {
+    if (name === "targetInputMode") {
+      setReviewTarget((prev) => ({
+        ...prev,
+        targetInputMode: value,
+        targetScope: "filtered",
+        targetMapId: "",
+        targetMapIds: [],
+        examUniqueNo: "",
+        cdValue: "",
+      }));
+      return;
+    }
+
+    const isDirectCollectMode = reviewTarget.targetInputMode === "direct_collect";
+
+    if (!isDirectCollectMode && name === "courseName") {
       setReviewTarget((prev) => ({
         ...prev,
         courseName: value,
@@ -1475,7 +1560,7 @@ function App() {
       return;
     }
 
-    if (name === "setName") {
+    if (!isDirectCollectMode && name === "setName") {
       setReviewTarget((prev) => ({
         ...prev,
         setName: value,
@@ -1489,7 +1574,7 @@ function App() {
       return;
     }
 
-    if (name === "subjectName") {
+    if (!isDirectCollectMode && name === "subjectName") {
       setReviewTarget((prev) => ({
         ...prev,
         subjectName: value,
@@ -1502,7 +1587,7 @@ function App() {
       return;
     }
 
-    if (name === "subtypeName") {
+    if (!isDirectCollectMode && name === "subtypeName") {
       setReviewTarget((prev) => ({
         ...prev,
         subtypeName: value,
@@ -1867,6 +1952,39 @@ const targetSubtypeOptions = useMemo(() => {
     };
   };
 
+  const buildDirectCollectReviewPayload = () => {
+    const courseName = String(reviewTarget.courseName || "").trim();
+    const setName = String(reviewTarget.setName || "").trim();
+    const subjectName = String(reviewTarget.subjectName || "").trim();
+    const rawSubtypeName = String(reviewTarget.subtypeName || "").trim();
+    const subtypeName = rawSubtypeName && rawSubtypeName !== subjectName ? rawSubtypeName : "";
+    const questionRange = String(reviewTarget.questionRange || "").trim() || "all";
+
+    if (!courseName) {
+      throw new Error("강좌명을 입력해 주세요.");
+    }
+
+    return {
+      course_name: courseName,
+      set_name: setName || undefined,
+      subject_name: subjectName || undefined,
+      subtype_name: subtypeName || undefined,
+      subject_mode: subjectName ? "specific" : "all",
+      subject_start_index: subjectName ? undefined : 1,
+      subject_end_index: undefined,
+      question_range: questionRange,
+      review_checks: normalizeReviewChecksForPayload(reviewChecks),
+      checks: normalizeReviewChecksForPayload(reviewChecks),
+      options: {
+        headless: true,
+        write_excel: false,
+        include_raw_data: true,
+        save_collected_to_db: true,
+        review_checks: normalizeReviewChecksForPayload(reviewChecks),
+      },
+    };
+  };
+
   const buildCombinedReviewPayload = (jobTargets) => {
     const targets = jobTargets.map(({ targetMap, rowsForMap }) =>
       buildReviewPayloadForMap(targetMap, rowsForMap)
@@ -2102,7 +2220,92 @@ const targetSubtypeOptions = useMemo(() => {
     const baseUrl = reviewTarget.reviewApiBase.replace(/\/$/, "");
 
     if (!String(reviewTarget.courseName || "").trim()) {
-      alert("검수 실행 전에는 강좌명을 선택해 주세요.");
+      alert(reviewTarget.targetInputMode === "direct_collect" ? "직접 수집할 강좌명을 입력해 주세요." : "검수 실행 전에는 강좌명을 선택해 주세요.");
+      return;
+    }
+
+    if (selectedReviewCheckCount === 0) {
+      alert("선택된 검수 항목이 없습니다. 최소 1개 이상의 검수 항목을 선택해 주세요.");
+      return;
+    }
+
+    if (reviewTarget.targetInputMode === "direct_collect") {
+      const questionRangeText = String(reviewTarget.questionRange || "").trim() || "all";
+      const proceed = window.confirm(
+        `직접 입력한 대상의 문제를 수집한 뒤 DB에 임시 저장하고 AI 검수를 실행할까요?
+문제 범위: ${questionRangeText}
+선택된 검수 항목: ${selectedReviewCheckCount}개
+${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
+      );
+
+      if (!proceed) return;
+
+      setReviewRunning(true);
+      setReviewJobInfo(null);
+
+      try {
+        const payload = buildDirectCollectReviewPayload();
+
+        const createRes = await fetch(`${baseUrl}/review-jobs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!createRes.ok) {
+          const text = await createRes.text();
+          throw new Error(`검수 작업 생성 실패: ${createRes.status} ${text}`);
+        }
+
+        const created = await createRes.json();
+        setReviewJobInfo({
+          ...created,
+          selected_review_check_count: selectedReviewCheckCount,
+          selected_review_check_labels: selectedReviewCheckLabels,
+        });
+
+        const result = await waitForReviewResult(baseUrl, created.job_id);
+        await applyAiReviewResult(result, {
+          labels: selectedReviewCheckLabels,
+          summary: makeReviewRunTitle(selectedReviewCheckLabels),
+        });
+
+        const totalReviewed = result.summary?.total_questions ?? 0;
+        const totalIssues = result.summary?.issue_question_count ?? 0;
+        const skippedQuestionCount = result.summary?.skipped_question_count ?? 0;
+        const requestedQuestionCount = result.summary?.requested_question_count ?? totalReviewed + skippedQuestionCount;
+
+        await fetchQuestions();
+        await fetchTargetMaps();
+
+        const isPartial =
+          !!result.partial ||
+          ["partial_failed", "partial_canceled"].includes(result.status);
+
+        alert(
+          [
+            isPartial
+              ? "AI 검수가 중간에 중단되었지만, 완료된 문제 결과는 반영했습니다."
+              : skippedQuestionCount
+                ? "AI 검수가 완료되었습니다. 단, 일부 문제는 API 오류로 건너뛰었습니다."
+                : "AI 검수가 완료되었습니다.",
+            "검수 방식: 직접 수집 + DB 임시 저장",
+            `요청 문제: ${requestedQuestionCount}개`,
+            `ChatGPT 검수 완료 문제: ${totalReviewed}개`,
+            skippedQuestionCount ? `API 오류로 건너뛴 문제: ${skippedQuestionCount}개` : "",
+            `적용 검수 항목: ${selectedReviewCheckText}`,
+            `오류 문제: ${totalIssues}개`,
+            "저장 위치: 문제 목록에서 시험 고유 번호 TEMP_로 검색하세요.",
+            isPartial && result.error_message ? `중단 사유: ${result.error_message}` : "",
+          ].filter(Boolean).join("\n")
+        );
+      } catch (error) {
+        console.error(error);
+        alert(`AI 검수 중 오류가 발생했습니다.\n${error.message}`);
+      } finally {
+        setReviewRunning(false);
+      }
+
       return;
     }
 
@@ -2364,77 +2567,141 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
       <div className="filter-section-title">검수 대상 지정</div>
       <div className="filter-grid review-target-grid compact-review-grid">
         <label className="field">
-          <span>강좌명 *</span>
+          <span>실행 방식</span>
           <select
-            name="courseName"
-            value={reviewTarget.courseName}
+            name="targetInputMode"
+            value={reviewTarget.targetInputMode}
             onChange={handleReviewTargetChange}
+            disabled={reviewRunning}
           >
-            <option value="">강좌명을 선택하세요</option>
-            {targetCourseOptions.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
+            <option value="mapped">매핑 기준 검수</option>
+            <option value="direct_collect">직접 입력 수집+DB저장</option>
           </select>
+        </label>
+
+        <label className="field">
+          <span>강좌명 *</span>
+          {reviewTarget.targetInputMode === "direct_collect" ? (
+            <input
+              name="courseName"
+              value={reviewTarget.courseName}
+              onChange={handleReviewTargetChange}
+              placeholder="예: SQLD 61회 끝장 패키지 PT 2026"
+            />
+          ) : (
+            <select
+              name="courseName"
+              value={reviewTarget.courseName}
+              onChange={handleReviewTargetChange}
+            >
+              <option value="">강좌명을 선택하세요</option>
+              {targetCourseOptions.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+          )}
         </label>
 
         <label className="field">
           <span>세트명 <em className="field-hint">선택 안 하면 전체</em></span>
-          <select
-            name="setName"
-            value={reviewTarget.setName}
-            onChange={handleReviewTargetChange}
-            disabled={!reviewTarget.courseName}
-          >
-            <option value="">전체 세트</option>
-            {targetSetOptions.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
-          </select>
+          {reviewTarget.targetInputMode === "direct_collect" ? (
+            <input
+              name="setName"
+              value={reviewTarget.setName}
+              onChange={handleReviewTargetChange}
+              placeholder="예: 오답킬러 100제"
+            />
+          ) : (
+            <select
+              name="setName"
+              value={reviewTarget.setName}
+              onChange={handleReviewTargetChange}
+              disabled={!reviewTarget.courseName}
+            >
+              <option value="">전체 세트</option>
+              {targetSetOptions.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+          )}
         </label>
 
         <label className="field">
           <span>과목명 <em className="field-hint">선택 안 하면 전체</em></span>
-          <select
-            name="subjectName"
-            value={reviewTarget.subjectName}
-            onChange={handleReviewTargetChange}
-            disabled={!reviewTarget.courseName}
-          >
-            <option value="">전체 과목</option>
-            {targetSubjectOptions.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
-          </select>
+          {reviewTarget.targetInputMode === "direct_collect" ? (
+            <input
+              name="subjectName"
+              value={reviewTarget.subjectName}
+              onChange={handleReviewTargetChange}
+              placeholder="예: SQL 기본 및 활용"
+            />
+          ) : (
+            <select
+              name="subjectName"
+              value={reviewTarget.subjectName}
+              onChange={handleReviewTargetChange}
+              disabled={!reviewTarget.courseName}
+            >
+              <option value="">전체 과목</option>
+              {targetSubjectOptions.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+          )}
         </label>
 
         <label className="field">
           <span>하위유형 <em className="field-hint">선택 안 하면 전체</em></span>
-          <select
-            name="subtypeName"
-            value={reviewTarget.subtypeName}
-            onChange={handleReviewTargetChange}
-            disabled={!reviewTarget.courseName}
-          >
-            <option value="">전체 하위유형</option>
-            {targetSubtypeOptions.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
-          </select>
+          {reviewTarget.targetInputMode === "direct_collect" ? (
+            <input
+              name="subtypeName"
+              value={reviewTarget.subtypeName}
+              onChange={handleReviewTargetChange}
+              placeholder="예: SQLD 오답킬러 2과목 3장"
+            />
+          ) : (
+            <select
+              name="subtypeName"
+              value={reviewTarget.subtypeName}
+              onChange={handleReviewTargetChange}
+              disabled={!reviewTarget.courseName}
+            >
+              <option value="">전체 하위유형</option>
+              {targetSubtypeOptions.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+          )}
         </label>
         <label className="field">
           <span>문제 범위 (선택, 예: 1-10)</span>
-          <input name="questionRange" value={reviewTarget.questionRange} onChange={handleReviewTargetChange} placeholder="비우면 선택 매핑 전체" />
+          <input name="questionRange" value={reviewTarget.questionRange} onChange={handleReviewTargetChange} placeholder={reviewTarget.targetInputMode === "direct_collect" ? "예: 1-10, 비우면 전체" : "비우면 선택 매핑 전체"} />
         </label>
         <label className="field">
           <span>검수 대상</span>
-          <select name="targetScope" value={reviewTarget.targetScope} onChange={handleReviewTargetChange}>
-            <option value="filtered">선택 매핑 기준 전체</option>
-            <option value="selected">체크 선택 문제 중 선택 매핑 기준</option>
-          </select>
+          {reviewTarget.targetInputMode === "direct_collect" ? (
+            <select value="direct_collect" disabled>
+              <option value="direct_collect">직접 입력 수집 대상</option>
+            </select>
+          ) : (
+            <select name="targetScope" value={reviewTarget.targetScope} onChange={handleReviewTargetChange}>
+              <option value="filtered">선택 매핑 기준 전체</option>
+              <option value="selected">체크 선택 문제 중 선택 매핑 기준</option>
+            </select>
+          )}
         </label>
       </div>
 
-      {reviewTarget.courseName ? (
+      {reviewTarget.targetInputMode === "direct_collect" ? (
+        <div className="review-status-line map-summary-line">
+          <strong>직접 수집+DB저장 모드</strong>
+          <span>강좌명: {reviewTarget.courseName || "-"}</span>
+          <span>세트명: {reviewTarget.setName || "전체"}</span>
+          <span>과목명: {reviewTarget.subjectName || "전체"}</span>
+          <span>하위유형: {reviewTarget.subtypeName || "전체"}</span>
+          <span>실행 시 시험 고유 번호는 TEMP_작업ID로 자동 생성됩니다.</span>
+        </div>
+      ) : reviewTarget.courseName ? (
         selectedTargetMaps.length > 0 ? (
           <div className="review-status-line map-summary-line">
             <strong>매칭된 검수 대상 {selectedTargetMaps.length}개</strong>
@@ -2536,6 +2803,28 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                     onChange={() => {
                       setActiveReviewPreset("");
                       toggleReviewGroup(setReviewChecks, "format", groupKey);
+                    }}
+                  />
+                  <span>{item.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="review-check-group">
+            <div className="review-check-group-title">PT쌤 합격팁 검수</div>
+            <div className="review-check-list">
+              {Object.entries(REVIEW_CHECK_GROUPS.pt_teacher_tip).map(([groupKey, item]) => (
+                <label
+                  key={groupKey}
+                  className="review-check-item"
+                  title={item.description}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isReviewGroupChecked(reviewChecks, "pt_teacher_tip", groupKey)}
+                    onChange={() => {
+                      setActiveReviewPreset("");
+                      toggleReviewGroup(setReviewChecks, "pt_teacher_tip", groupKey);
                     }}
                   />
                   <span>{item.label}</span>

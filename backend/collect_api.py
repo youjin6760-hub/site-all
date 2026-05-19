@@ -150,18 +150,128 @@ def question_no_from_filename_safe(path: Path):
 
 
 EXPLANATION_BODY_SELECTORS = [
-    "div.tg2g2 div.more-c div.t1",  # 기존 구조
-    "div.tg2g2 > div.t1",           # 예비문제 구조
+    "div.tg2g2 div.more-c div.t1",  # fallback
+    "div.tg2g2 > div.t1",           # fallback
 ]
 
 EXPLANATION_KEYWORD_SELECTORS = [
-    "div.tg2g2 div.more-c div.t2 a.tag",  # 기존 구조
-    "div.tg2g2 div.t2 a.tag",             # 예비문제 구조
+    "div.tg2g2 div.more-c div.t2 a.tag",  # fallback
+    "div.tg2g2 div.t2 a.tag",             # fallback
     "div.tg2g2 a.tag",
 ]
 
+PT_TEACHER_TIP_TITLE = "PT쌤 합격팁"
+BIGIBOT_TITLE = "비기봇 해설"
+
+PT_TEACHER_TIP_TITLE_VARIANTS = [
+    "PT쌤 합격팁",
+    "PT쌤합격팁",
+]
+
+BIGIBOT_TITLE_VARIANTS = [
+    "비기봇 해설",
+    "비기봇해설",
+]
+
+def make_empty_pt_teacher_tip() -> dict:
+    return {
+        "has_tip": False,
+    }
+
+
+def normalize_card_text(value: str) -> str:
+    value = value or ""
+    value = value.replace("\u00a0", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def contains_any_title(text: str, titles: list[str]) -> bool:
+    text = normalize_card_text(text)
+    compact_text = re.sub(r"\s+", "", text)
+
+    for title in titles:
+        title = normalize_card_text(title)
+        compact_title = re.sub(r"\s+", "", title)
+
+        if title in text:
+            return True
+
+        if compact_title in compact_text:
+            return True
+
+    return False
+
+
+def get_help_card_locator(page, title_variants):
+    """
+    div#m-help1 안의 div.tg2g2 카드 중
+    PT쌤 합격팁 / 비기봇 해설 카드를 제목 기준으로 찾습니다.
+    """
+    if isinstance(title_variants, str):
+        title_variants = [title_variants]
+
+    try:
+        cards = page.locator("div#m-help1 div.tg2g2")
+        count = cards.count()
+
+        for i in range(count):
+            card = cards.nth(i)
+
+            try:
+                card_text = normalize_card_text(card.inner_text())
+            except Exception:
+                card_text = ""
+
+            if contains_any_title(card_text, title_variants):
+                return card
+
+    except Exception as e:
+        print(f"[도움말 카드 탐색 오류] {title_variants}: {e}")
+
+    return None
+
+
+def get_bigibot_card_locator(page):
+    return get_help_card_locator(page, BIGIBOT_TITLE_VARIANTS)
+
+
+def get_pt_teacher_tip_card_locator(page):
+    return get_help_card_locator(page, PT_TEACHER_TIP_TITLE_VARIANTS)
+
 
 def get_explanation_body_locator(page):
+    """
+    비기봇 해설 본문만 반환합니다.
+    PT쌤 합격팁의 분석 div.t1과 섞이지 않게 카드 제목 기준으로 먼저 분리합니다.
+    """
+    card = get_bigibot_card_locator(page)
+
+    if card is not None:
+        selectors = [
+            "div.more-c > div.t1",
+            "div.more-c div.t1",
+            ":scope > div.t1",
+            "div.t1",
+        ]
+
+        for sel in selectors:
+            try:
+                loc = card.locator(sel).first
+                if loc.count() > 0 and loc.is_visible(timeout=1000):
+                    return loc
+            except Exception:
+                pass
+
+        for sel in selectors:
+            try:
+                loc = card.locator(sel).first
+                if loc.count() > 0:
+                    return loc
+            except Exception:
+                pass
+
+    # 비기봇 제목을 못 찾았을 때만 기존 방식 fallback
     for sel in EXPLANATION_BODY_SELECTORS:
         loc = page.locator(sel).first
         try:
@@ -1333,6 +1443,86 @@ def login(page, user_id, password):
     save_debug(page, "after_login_main_reload")
 
 
+
+def extract_bigibot_keyword_texts_from_card(card) -> list[str]:
+    """
+    비기봇 해설 more-c 안의 키워드 태그만 추출합니다.
+    같은 도움말 영역 안에 있는 핵심쇼츠강의 영상 태그(.m-viewvideo)는 제외합니다.
+    """
+    try:
+        values = card.evaluate(
+            """
+            (el, titleVariants) => {
+                const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+                const compact = (value) => normalize(value).replace(/\\s+/g, "");
+
+                const matchesTitle = (text) => {
+                    const normalized = normalize(text);
+                    const compactText = compact(text);
+
+                    return titleVariants.some((title) => {
+                        const normalizedTitle = normalize(title);
+                        const compactTitle = compact(title);
+
+                        return (
+                            normalized.includes(normalizedTitle) ||
+                            compactText.includes(compactTitle)
+                        );
+                    });
+                };
+
+                const moreBlocks = Array.from(el.querySelectorAll("div.more-c"));
+
+                let target = moreBlocks.find((block) => {
+                    const titleEl = block.querySelector(":scope > strong.tt1, strong.tt1");
+                    return titleEl && matchesTitle(titleEl.textContent || "");
+                });
+
+                if (!target) {
+                    target = el;
+                }
+
+                const tags = Array.from(target.querySelectorAll("div.t2 a.tag"));
+
+                return tags
+                    .filter((a) => {
+                        const cls = a.getAttribute("class") || "";
+                        const href = a.getAttribute("href") || "";
+                        const dataTag = a.getAttribute("data-tag") || "";
+
+                        if (cls.split(/\\s+/).includes("m-viewvideo")) return false;
+                        if (dataTag) return false;
+                        if (href.startsWith("#cplview")) return false;
+                        if (href.toLowerCase().includes("video")) return false;
+
+                        const nearestMore = a.closest("div.more-c");
+                        const titleEl = nearestMore ? nearestMore.querySelector(":scope > strong.tt1, strong.tt1") : null;
+                        const titleText = titleEl ? normalize(titleEl.textContent || "") : "";
+
+                        if (titleText.includes("핵심쇼츠강의")) return false;
+
+                        return true;
+                    })
+                    .map((a) => normalize(a.textContent || "").replace(/^#/, "").trim())
+                    .filter(Boolean);
+            }
+            """,
+            BIGIBOT_TITLE_VARIANTS,
+        )
+
+        result = []
+        for value in values or []:
+            txt = sanitize_text(str(value)).lstrip("#").strip()
+            if txt and txt not in result:
+                result.append(txt)
+
+        return result
+
+    except Exception as e:
+        print(f"[비기봇 키워드 전용 추출 오류] {e}")
+        return []
+
+
 def extract_keywords(page, wait_ready=True):
     keywords = []
 
@@ -1340,6 +1530,20 @@ def extract_keywords(page, wait_ready=True):
         if wait_ready:
             wait_until_explanation_ready(page)
 
+        # 1순위: 비기봇 해설 more-c 안의 키워드만 가져오기
+        # 핵심쇼츠강의 영상 태그도 a.tag를 사용하므로 반드시 제외합니다.
+        card = get_bigibot_card_locator(page)
+
+        if card is not None:
+            for txt in extract_bigibot_keyword_texts_from_card(card):
+                if txt and txt not in keywords:
+                    keywords.append(txt)
+
+            if keywords:
+                return keywords
+
+        # 2순위 fallback: 기존 방식
+        # fallback에서도 핵심쇼츠강의 영상 태그(.m-viewvideo/data-tag)는 제외합니다.
         for sel in EXPLANATION_KEYWORD_SELECTORS:
             items = page.locator(sel)
             count = items.count()
@@ -1348,13 +1552,37 @@ def extract_keywords(page, wait_ready=True):
                 continue
 
             for i in range(count):
-                raw = items.nth(i).text_content() or ""
-                txt = re.sub(r"\s+", " ", raw).strip()
+                item = items.nth(i)
 
-                if not txt:
+                raw = item.text_content() or ""
+                txt = re.sub(r"\s+", " ", raw).strip()
+                txt = txt.lstrip("#").strip()
+
+                try:
+                    class_attr = item.get_attribute("class") or ""
+                    href = item.get_attribute("href") or ""
+                    data_tag = item.get_attribute("data-tag") or ""
+                except Exception:
+                    class_attr = ""
+                    href = ""
+                    data_tag = ""
+
+                if "m-viewvideo" in class_attr.split():
                     continue
 
-                txt = txt.lstrip("#").strip()
+                if data_tag:
+                    continue
+
+                if href.startswith("#cplview") or "video" in href.lower():
+                    continue
+
+                # PT쌤 합격팁 태그는 키워드에서 제외
+                if any(label in txt for label in ["개념 난이도", "정답률", "유형"]):
+                    continue
+
+                # 핵심쇼츠강의 제목은 키워드가 아니므로 제외
+                if "핵심쇼츠강의" in txt:
+                    continue
 
                 if txt and txt not in keywords:
                     keywords.append(txt)
@@ -1891,6 +2119,283 @@ def extract_explanation(page):
         return ""
 
 
+def _extract_tag_value(text: str, label: str) -> str:
+    text = sanitize_text(text)
+
+    if label not in text:
+        return ""
+
+    value = text.replace(label, "", 1)
+
+    # 사이트에서 | 대신 한글 세로획 ㅣ 또는 전각 ｜가 들어가는 경우까지 제거
+    value = value.replace("|", " ")
+    value = value.replace("ㅣ", " ")
+    value = value.replace("｜", " ")
+
+    value = re.sub(r"\s+", " ", value).strip()
+
+    return value
+
+
+def has_em_highlight(locator) -> bool:
+    """
+    초록색 강조 표시 여부 확인.
+    예: <em class="em">3번</em>, <em class="em">73%</em>
+    """
+    try:
+        return locator.locator("em.em").count() > 0
+    except Exception:
+        return False
+
+
+def get_em_text(locator) -> str:
+    """
+    em.em 안의 텍스트만 가져옵니다.
+    없으면 빈 문자열을 반환합니다.
+    """
+    try:
+        em = locator.locator("em.em").first
+        if em.count() > 0:
+            return sanitize_text(em.inner_text())
+    except Exception:
+        pass
+
+    return ""
+
+
+def clean_pt_teacher_tip(result: dict) -> dict:
+    """
+    PT쌤 합격팁 결과에서 실제 필요한 값만 남깁니다.
+    빈 문자열, 빈 배열, None 값은 저장하지 않습니다.
+    """
+    if not result or not result.get("has_tip"):
+        return {"has_tip": False}
+
+    cleaned = {
+        "has_tip": True,
+    }
+
+    for key in ["tip_type", "title", "difficulty", "answer_rate"]:
+        value = result.get(key)
+        if value not in ("", None, [], {}):
+            cleaned[key] = value
+
+    tip_type = result.get("tip_type")
+
+    if tip_type == "choice_rate_table":
+        question_type = result.get("question_type")
+        if question_type:
+            cleaned["question_type"] = question_type
+
+        rates = []
+        for item in result.get("choice_answer_rates", []) or []:
+            choice = item.get("choice")
+            rate = item.get("rate")
+            index = item.get("index")
+
+            row = {}
+            if choice:
+                row["choice"] = choice
+            if rate:
+                row["rate"] = rate
+            if index is not None:
+                row["index"] = index
+
+            if row:
+                rates.append(row)
+
+        if rates:
+            cleaned["choice_answer_rates"] = rates
+
+        for key in ["highlighted_choice", "highlighted_rate", "highlighted_index"]:
+            value = result.get(key)
+            if value not in ("", None, [], {}):
+                cleaned[key] = value
+
+    elif tip_type == "trend_analysis":
+        trend = result.get("trend")
+        if trend:
+            cleaned["trend"] = trend
+
+    else:
+        # 예외 구조가 생겼을 때만 값이 있는 필드를 최소 저장
+        for key in [
+            "question_type",
+            "trend",
+            "choice_answer_rates",
+            "highlighted_choice",
+            "highlighted_rate",
+            "highlighted_index",
+        ]:
+            value = result.get(key)
+            if value not in ("", None, [], {}):
+                cleaned[key] = value
+
+    analysis = result.get("analysis")
+    if analysis:
+        cleaned["analysis"] = analysis
+
+    return cleaned
+
+
+def extract_pt_teacher_tip(page) -> dict:
+    """
+    PT쌤 합격팁을 비기봇 해설과 분리해서 추출합니다.
+
+    지원 구조:
+    1) 개념 난이도 + 정답률 + 출제 경향 + 분석
+       -> tip_type = trend_analysis
+
+    2) 개념 난이도 + 정답률 + 유형 + 선지별 선택률 표 + 분석
+       -> tip_type = choice_rate_table
+    """
+    result = make_empty_pt_teacher_tip()
+
+    try:
+        card = get_pt_teacher_tip_card_locator(page)
+
+        if card is None:
+            return result
+
+        raw_text = locator_text_with_br(card)
+
+        if not contains_any_title(raw_text, PT_TEACHER_TIP_TITLE_VARIANTS):
+            print(f"[경고] PT쌤 합격팁 카드 후보를 찾았지만 제목 확인 실패: {raw_text[:200]}")
+            return make_empty_pt_teacher_tip()
+
+        result["has_tip"] = True
+        result["title"] = PT_TEACHER_TIP_TITLE
+
+        # 난이도 / 정답률 / 유형 태그
+        try:
+            tags = card.locator("a.tag")
+            tag_count = tags.count()
+
+            for i in range(tag_count):
+                txt = sanitize_text(tags.nth(i).inner_text())
+
+                if "개념 난이도" in txt:
+                    result["difficulty"] = _extract_tag_value(txt, "개념 난이도")
+                elif "정답률" in txt:
+                    result["answer_rate"] = _extract_tag_value(txt, "정답률")
+                elif "유형" in txt:
+                    result["question_type"] = _extract_tag_value(txt, "유형")
+
+        except Exception as e:
+            print(f"[PT쌤 합격팁 태그 추출 오류] {e}")
+
+        # 선지별 선택률 표 + 초록색 강조 정답 추출
+        try:
+            table = card.locator("table.tb1").first
+
+            if table.count() > 0:
+                ths = table.locator("thead th")
+                tds = table.locator("tbody td")
+
+                choice_answer_rates = []
+
+                max_count = min(ths.count(), tds.count())
+
+                for i in range(max_count):
+                    th = ths.nth(i)
+                    td = tds.nth(i)
+
+                    choice_text = sanitize_text(th.inner_text())
+                    rate_text = sanitize_text(td.inner_text())
+
+                    choice_em_text = get_em_text(th)
+                    rate_em_text = get_em_text(td)
+
+                    is_choice_highlighted = has_em_highlight(th)
+                    is_rate_highlighted = has_em_highlight(td)
+                    is_highlighted = is_choice_highlighted or is_rate_highlighted
+
+                    item = {
+                        "choice": choice_text,
+                        "rate": rate_text,
+                        "index": i + 1,
+                    }
+
+                    choice_answer_rates.append(item)
+
+                    # 초록색 표시된 선지/정답률을 별도 필드에도 저장
+                    if is_highlighted:
+                        result["highlighted_choice"] = choice_em_text or choice_text
+                        result["highlighted_rate"] = rate_em_text or rate_text
+                        result["highlighted_index"] = i + 1
+
+                result["choice_answer_rates"] = choice_answer_rates
+
+        except Exception as e:
+            print(f"[PT쌤 합격팁 선택률 표 추출 오류] {e}")
+
+        # 출제 경향 / 분석
+        try:
+            items = card.locator("ul.bu > li")
+            item_count = items.count()
+
+            for i in range(item_count):
+                li = items.nth(i)
+
+                title = ""
+                body = ""
+
+                try:
+                    title = sanitize_text(
+                        li.locator(":scope > strong.tt2").first.inner_text()
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    body = locator_text_with_br(
+                        li.locator(":scope > div.t1").first
+                    )
+                except Exception:
+                    pass
+
+                if "출제 경향" in title:
+                    result["trend"] = body
+                elif "분석" in title:
+                    result["analysis"] = body
+
+        except Exception as e:
+            print(f"[PT쌤 합격팁 출제경향/분석 추출 오류] {e}")
+
+        # 유형 구분
+        has_choice_rate_table = bool(result.get("choice_answer_rates"))
+        has_trend = bool(result.get("trend"))
+        has_question_type = bool(result.get("question_type"))
+        has_analysis = bool(result.get("analysis"))
+
+        if has_choice_rate_table:
+            result["tip_type"] = "choice_rate_table"
+        elif has_trend:
+            result["tip_type"] = "trend_analysis"
+        elif has_question_type:
+            result["tip_type"] = "type_analysis"
+        elif has_analysis:
+            result["tip_type"] = "analysis_only"
+        else:
+            result["tip_type"] = "unknown"
+
+        print(
+            "[디버그] PT쌤 합격팁 추출: "
+            f"has_tip={result.get('has_tip')}, "
+            f"tip_type={result.get('tip_type', '')}, "
+            f"difficulty={result.get('difficulty', '')}, "
+            f"answer_rate={result.get('answer_rate', '')}, "
+            f"question_type={result.get('question_type', '')}"
+        )
+        
+        return clean_pt_teacher_tip(result)
+
+    except Exception as e:
+        print(f"[PT쌤 합격팁 추출 오류] {e}")
+        save_debug(page, "extract_pt_teacher_tip_fail")
+        return make_empty_pt_teacher_tip()
+
+
 def should_capture_explanation(page, text):
 
     # MathJax 수식 있으면 캡처
@@ -2346,6 +2851,7 @@ def extract_question(page, course_name, set_name, subject_name, capture_assets=T
                 "choices": [],
                 "answer": "",
                 "explanation": "",
+                "pt_teacher_tip": make_empty_pt_teacher_tip(),
                 "explanation_images": [],
                 "section_tags": [],
                 "keywords": [],
@@ -2374,6 +2880,7 @@ def extract_question(page, course_name, set_name, subject_name, capture_assets=T
 
     body, extra_text = extract_body_and_extra(page)
     explanation = extract_explanation(page)
+    pt_teacher_tip = extract_pt_teacher_tip(page)
     answer = extract_answer_from_dom(page)
     section_tags = extract_section_tags(page)
     keywords = extract_keywords(page, wait_ready=False)
@@ -2430,6 +2937,7 @@ def extract_question(page, course_name, set_name, subject_name, capture_assets=T
             "choices": choices,
             "answer": answer,
             "explanation": explanation,
+            "pt_teacher_tip": pt_teacher_tip,
             "explanation_images": explanation_images,
             "explanation_capture_meta": explanation_capture_meta,
             "section_tags": section_tags,

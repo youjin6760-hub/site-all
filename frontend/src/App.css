@@ -2428,3 +2428,14 @@ a {
 .review-history-delete-btn:hover {
   background: #dc2626;
 }
+
+.review-check-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 45%) minmax(0, 37%) 180px;
+  gap: 12px;
+  justify-content: start;
+}
+
+.review-check-grid > .review-check-group:nth-child(3) {
+  margin-left: 0;
+}

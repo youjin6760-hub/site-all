@@ -20,6 +20,7 @@ from prompt_builder import (
     merge_review_checks,
     should_run_content_review,
     should_run_format_review,
+    should_run_pt_teacher_tip_review,
 )
 
 
@@ -274,6 +275,7 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
     selected_checks = get_selected_review_checks(review_checks)
     run_content = should_run_content_review(selected_checks)
     run_format = should_run_format_review(selected_checks)
+    run_pt_teacher_tip = should_run_pt_teacher_tip_review(selected_checks)
 
     question_material_images = [
         item for item in image_elements
@@ -285,7 +287,7 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
         if item.get("location") == "choice"
     ]
 
-    review_json = json.dumps({
+    review_payload = {
         "problem": {
             "question_text": data.get("body", ""),
             "given_text": data.get("extra_text", ""),
@@ -298,7 +300,12 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
         "explanation": data.get("explanation", ""),
         "explanation_images": data.get("explanation_images", []),
         "explanation_capture_meta": data.get("explanation_capture_meta", {}),
-    }, ensure_ascii=False, indent=2)
+    }
+
+    if run_pt_teacher_tip:
+        review_payload["pt_teacher_tip"] = data.get("pt_teacher_tip") or {"has_tip": False}
+
+    review_json = json.dumps(review_payload, ensure_ascii=False, indent=2)
 
     choice_image_lines = []
     for item in choice_material_images:
@@ -400,6 +407,16 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
             "- 단, 내용 검수 항목이 함께 선택된 경우 이미지의 실제 내용 판단은 위 [내용 검수 추가 지시]를 우선 적용하세요.\n"
         )
 
+    if mode == "selected" and run_pt_teacher_tip:
+        extra_instruction_parts.append(
+            "[PT쌤 합격팁 검수 추가 지시]\n"
+            "- PT쌤 합격팁 검수가 선택된 경우 pt_teacher_tip을 문제, 보기, 선지, 정답, 키워드, 비기봇 해설과 비교하세요.\n"
+            "- 개념 난이도, 정답률, 유형, 선지별 정답률, 강조 선지, 강조 정답률, 출제 경향, 분석 내용이 서로 모순되는지 확인하세요.\n"
+            "- answer_rate와 highlighted_rate는 소수점 제외 또는 반올림 후 숫자가 같으면 오류로 보지 마세요.\n"
+            "- 문제 데이터만으로 확인할 수 없는 실제 기출 출제 횟수의 진위는 오류로 기록하지 마세요.\n"
+            "- 오류가 명확할 때만 'PT쌤 합격팁 오류'로 기록하세요.\n"
+        )
+
     if not extra_instruction_parts:
         extra_instruction_parts.append(
             "[검수 항목 없음]\n"
@@ -419,7 +436,8 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
             f"- problem.given_images: 보기/제시자료 이미지입니다. 표, 테이블, ERD, 그림, 수식 이미지가 여기에 포함될 수 있습니다.\n"
             f"- choices: 정답 선택지입니다.\n"
             f"- choice_images: 선지 자체가 이미지인 경우의 선지 이미지입니다.\n"
-            f"- explanation: 해설입니다.\n"
+            f"- explanation: 비기봇 해설입니다.\n"
+            f"- pt_teacher_tip: PT쌤 합격팁입니다. PT쌤 합격팁 검수가 선택된 경우에만 문제 데이터 JSON에 포함됩니다.\n"
             f"- keywords: 문제 분류용 키워드입니다. 키워드 검수가 선택된 경우 문제 핵심 개념과 일치하는지 확인하세요.\n\n"
             f"{matching_instruction}"
             f"[검수용 추가 정보]\n"
@@ -448,6 +466,7 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
         or content_checks.get("answer_validation")
         or content_checks.get("answer_correctness")
         or content_checks.get("explanation_logic")
+        or run_pt_teacher_tip
     )
 
     needs_choice_image_review = (
@@ -458,6 +477,7 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
         or content_checks.get("answer_validation")
         or content_checks.get("answer_correctness")
         or content_checks.get("choice_explanation_match")
+        or run_pt_teacher_tip
     )
 
     needs_explanation_image_review = (
@@ -733,8 +753,9 @@ def merge_selected_review_result(
     checks = get_selected_review_checks(review_checks)
     run_content = any(checks["content"].values())
     run_format = any(checks["format"].values())
+    run_pt_teacher_tip = any(checks.get("pt_teacher_tip", {}).values())
 
-    content_issues = (selected_result.get("content_issues", []) or []) if run_content else []
+    content_issues = (selected_result.get("content_issues", []) or []) if (run_content or run_pt_teacher_tip) else []
     format_issues = (selected_result.get("format_issues", []) or []) if run_format else []
 
     content_issues = [issue for issue in content_issues if not is_false_positive_normal_issue(issue)]
@@ -860,6 +881,353 @@ def filter_quote_false_positive_issues(reviewed):
     return refresh_review_summary(reviewed)
 
     
+
+def parse_percent_number(value: Any) -> float | None:
+    text = str(value or "").strip()
+    match = re.search(r"\d+(?:\.\d+)?", text)
+
+    if not match:
+        return None
+
+    try:
+        return float(match.group(0))
+    except Exception:
+        return None
+
+
+def percent_numbers_match_with_rounding_or_truncation(left: Any, right: Any) -> bool:
+    left_number = parse_percent_number(left)
+    right_number = parse_percent_number(right)
+
+    if left_number is None or right_number is None:
+        return False
+
+    # 소수점 제외 기준 또는 반올림 기준 중 하나라도 같으면 같은 정답률로 봅니다.
+    return int(left_number) == int(right_number) or round(left_number) == round(right_number)
+
+
+def filter_pt_teacher_tip_rate_rounding_issues(reviewed: dict, question_data: dict) -> dict:
+    """
+    PT쌤 합격팁 정답률 비교에서 소수점 표기 차이만으로 생긴 오탐을 제거합니다.
+    예: answer_rate=89%, highlighted_rate=88.9%는 반올림 기준으로 같으므로 오류가 아닙니다.
+    """
+    data = question_data.get("data", {}) or {}
+    tip = data.get("pt_teacher_tip", {}) or {}
+
+    if not tip.get("has_tip"):
+        return reviewed
+
+    answer_rate = tip.get("answer_rate")
+    highlighted_rate = tip.get("highlighted_rate")
+
+    if not percent_numbers_match_with_rounding_or_truncation(answer_rate, highlighted_rate):
+        return reviewed
+
+    def is_rate_rounding_false_positive(issue: dict) -> bool:
+        if str(issue.get("type", "")).strip() != "PT쌤 합격팁 오류":
+            return False
+
+        text = (
+            str(issue.get("reason", "")) + " " +
+            str(issue.get("suggestion", ""))
+        )
+
+        if "정답률" not in text:
+            return False
+
+        rate_mismatch_words = [
+            "highlighted_rate",
+            "answer_rate",
+            "강조 정답률",
+            "강조된 정답률",
+            "강조",
+            "일치하지",
+            "다릅니다",
+            "서로 다",
+        ]
+
+        return any(word in text for word in rate_mismatch_words)
+
+    reviewed["content_issues"] = [
+        issue for issue in reviewed.get("content_issues", []) or []
+        if not is_rate_rounding_false_positive(issue)
+    ]
+
+    return refresh_review_summary(reviewed)
+
+
+
+def normalize_space_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def parse_first_int(value: Any) -> int | None:
+    match = re.search(r"\d+", str(value or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except Exception:
+        return None
+
+
+def values_match_by_text_or_number(left: Any, right: Any) -> bool:
+    left_text = normalize_space_text(left)
+    right_text = normalize_space_text(right)
+
+    if left_text and right_text and left_text == right_text:
+        return True
+
+    left_num = parse_first_int(left_text)
+    right_num = parse_first_int(right_text)
+
+    return left_num is not None and right_num is not None and left_num == right_num
+
+
+def get_rate_row_by_index(rates: list[Any], index: Any) -> dict[str, Any] | None:
+    target_index = parse_first_int(index)
+
+    if target_index is None:
+        return None
+
+    for item in rates:
+        if not isinstance(item, dict):
+            continue
+
+        item_index = parse_first_int(item.get("index"))
+
+        if item_index == target_index:
+            return item
+
+    return None
+
+
+def validate_pt_teacher_tip_static(question_data: dict) -> list[dict[str, str]]:
+    """
+    PT쌤 합격팁의 숫자/구조 정합성은 GPT가 아니라 코드로 확정 검수합니다.
+    의미 검수(분석 내용이 문제와 맞는지)는 프롬프트에서 처리합니다.
+    """
+    data = question_data.get("data", {}) or {}
+    tip = data.get("pt_teacher_tip", {}) or {}
+
+    if not isinstance(tip, dict) or not tip.get("has_tip"):
+        return []
+
+    issues: list[dict[str, str]] = []
+
+    answer = data.get("answer")
+    answer_index = parse_first_int(answer)
+
+    answer_rate = tip.get("answer_rate")
+    highlighted_rate = tip.get("highlighted_rate")
+    highlighted_choice = tip.get("highlighted_choice")
+    highlighted_index = tip.get("highlighted_index")
+    rates = tip.get("choice_answer_rates") or []
+
+    if not isinstance(rates, list):
+        rates = []
+
+    def add_issue(reason: str, suggestion: str) -> None:
+        issues.append({
+            "type": "PT쌤 합격팁 오류",
+            "reason": reason,
+            "suggestion": suggestion,
+        })
+
+    # 1) 정답률과 강조 정답률 비교: 소수점 버림/반올림 기준으로 같으면 정상입니다.
+    if answer_rate not in (None, "") and highlighted_rate not in (None, ""):
+        if not percent_numbers_match_with_rounding_or_truncation(answer_rate, highlighted_rate):
+            add_issue(
+                f"PT쌤 합격팁의 정답률은 '{answer_rate}'인데 강조 정답률은 '{highlighted_rate}'로 서로 다릅니다.",
+                "PT쌤 합격팁의 정답률과 강조 정답률을 같은 값으로 수정하세요.",
+            )
+
+    # 2) highlighted_index가 표 안에 실제로 있는지 확인합니다.
+    matched_row = None
+    if highlighted_index not in (None, ""):
+        matched_row = get_rate_row_by_index(rates, highlighted_index)
+
+        if rates and matched_row is None:
+            add_issue(
+                f"PT쌤 합격팁의 강조 index '{highlighted_index}'가 선지별 정답률 표에 없습니다.",
+                "highlighted_index를 선지별 정답률 표의 실제 index와 일치하도록 수정하세요.",
+            )
+
+    # 3) highlighted_choice / highlighted_rate가 highlighted_index의 표 행과 맞는지 확인합니다.
+    if matched_row is not None:
+        row_choice = matched_row.get("choice")
+        row_rate = matched_row.get("rate")
+
+        if highlighted_choice not in (None, "") and row_choice not in (None, ""):
+            if not values_match_by_text_or_number(highlighted_choice, row_choice):
+                add_issue(
+                    f"PT쌤 합격팁의 강조 선지는 '{highlighted_choice}'인데 선지별 정답률 표의 해당 선지는 '{row_choice}'입니다.",
+                    "highlighted_choice를 highlighted_index에 해당하는 선지와 일치하도록 수정하세요.",
+                )
+
+        if highlighted_rate not in (None, "") and row_rate not in (None, ""):
+            if not percent_numbers_match_with_rounding_or_truncation(highlighted_rate, row_rate):
+                add_issue(
+                    f"PT쌤 합격팁의 강조 정답률은 '{highlighted_rate}'인데 선지별 정답률 표의 해당 정답률은 '{row_rate}'입니다.",
+                    "highlighted_rate를 highlighted_index에 해당하는 정답률과 일치하도록 수정하세요.",
+                )
+
+    # 4) 선지별 정답률 표의 index와 choice 번호가 뒤섞였는지 확인합니다.
+    for item in rates:
+        if not isinstance(item, dict):
+            continue
+
+        item_index = parse_first_int(item.get("index"))
+        item_choice_index = parse_first_int(item.get("choice"))
+
+        if item_index is None or item_choice_index is None:
+            continue
+
+        if item_index != item_choice_index:
+            add_issue(
+                f"선지별 정답률 표에서 index는 '{item.get('index')}'인데 선지는 '{item.get('choice')}'로 서로 맞지 않습니다.",
+                "choice_answer_rates의 index와 choice 번호가 같은 선지를 가리키도록 수정하세요.",
+            )
+
+    # 5) 강조 선지/index가 실제 정답 answer와 맞는지 확인합니다.
+    # answer가 단일 숫자로 확인될 때만 판단합니다.
+    if answer_index is not None:
+        highlighted_index_number = parse_first_int(highlighted_index)
+
+        if highlighted_index_number is not None and highlighted_index_number != answer_index:
+            add_issue(
+                f"문제 정답은 '{answer}'인데 PT쌤 합격팁의 강조 index는 '{highlighted_index}'입니다.",
+                "PT쌤 합격팁의 강조 index를 실제 정답 선지와 일치하도록 수정하세요.",
+            )
+
+        highlighted_choice_number = parse_first_int(highlighted_choice)
+
+        if highlighted_choice_number is not None and highlighted_choice_number != answer_index:
+            add_issue(
+                f"문제 정답은 '{answer}'인데 PT쌤 합격팁의 강조 선지는 '{highlighted_choice}'입니다.",
+                "PT쌤 합격팁의 강조 선지를 실제 정답 선지와 일치하도록 수정하세요.",
+            )
+
+    return dedupe_issues(issues)
+
+
+def add_pt_teacher_tip_static_issues(
+    reviewed: dict,
+    question_data: dict,
+    selected_checks: dict[str, Any],
+) -> dict:
+    if not is_check_enabled(selected_checks, "pt_teacher_tip", "pt_teacher_tip_validation"):
+        return reviewed
+
+    static_issues = validate_pt_teacher_tip_static(question_data)
+
+    if not static_issues:
+        return reviewed
+
+    reviewed.setdefault("content_issues", [])
+    reviewed["content_issues"].extend(static_issues)
+    reviewed["content_issues"] = dedupe_issues(reviewed.get("content_issues", []))
+
+    return refresh_review_summary(reviewed)
+
+
+def add_start_sentence_format_issue(reviewed: dict, question_data: dict) -> dict:
+    explanation = question_data.get("data", {}).get("explanation", "") or ""
+
+    if not explanation.strip():
+        return reviewed
+
+    first_line = ""
+    for line in explanation.strip().splitlines():
+        line = line.strip()
+        if line:
+            first_line = line
+            break
+
+    if not first_line:
+        return reviewed
+
+    pattern = r"^정답은\s*[1-5]\s*번입니다\.?$"
+
+    if re.match(pattern, first_line):
+        return reviewed
+
+    issue = {
+        "type": "해설 시작 형식 오류",
+        "reason": f"해설 첫 문장이 '정답은 X번입니다.' 형식이 아닙니다. 현재 첫 문장: '{first_line}'",
+        "suggestion": "해설 첫 문장을 '정답은 X번입니다.' 형식으로 수정하세요.",
+    }
+
+    reviewed.setdefault("format_issues", [])
+
+    already_exists = any(
+        str(i.get("type", "")) == "해설 시작 형식 오류"
+        for i in reviewed.get("format_issues", [])
+    )
+
+    if not already_exists:
+        reviewed["format_issues"].append(issue)
+
+    return refresh_review_summary(reviewed)
+
+
+def add_conclusion_sentence_issue(reviewed: dict, question_data: dict) -> dict:
+    data = question_data.get("data", {}) or {}
+    explanation = data.get("explanation", "") or ""
+    answer = str(data.get("answer", "")).strip()
+    choices = data.get("choices", []) or []
+
+    if not explanation.strip():
+        return reviewed
+
+    lines = [line.strip() for line in explanation.strip().splitlines() if line.strip()]
+    if not lines:
+        return reviewed
+
+    last_line = lines[-1]
+
+    # 마지막 문장에 결론 형식이 있으면 정상
+    has_conclusion = (
+        "따라서" in last_line
+        and "정답은" in last_line
+        and "입니다" in last_line
+    )
+
+    if has_conclusion:
+        return reviewed
+
+    correct_choice = ""
+    if answer.isdigit():
+        idx = int(answer) - 1
+        if 0 <= idx < len(choices):
+            correct_choice = str(choices[idx]).strip()
+
+    if correct_choice:
+        suggestion = f"해설 마지막에 \"따라서, 정답은 '{correct_choice}' 입니다.\" 형식의 결론 문장을 추가하세요."
+    elif answer:
+        suggestion = f"해설 마지막에 \"따라서, 정답은 '{answer}번' 입니다.\" 형식의 결론 문장을 추가하세요."
+    else:
+        suggestion = "해설 마지막에 '따라서, 정답은 ... 입니다.' 형식의 결론 문장을 추가하세요."
+
+    issue = {
+        "type": "결론 누락",
+        "reason": "해설 마지막에 '따라서, 정답은 ... 입니다.' 형식의 결론 문장이 없습니다.",
+        "suggestion": suggestion,
+    }
+
+    reviewed.setdefault("format_issues", [])
+
+    already_exists = any(
+        str(i.get("type", "")) in {"결론 누락", "최종 문장 형식 오류"}
+        for i in reviewed.get("format_issues", [])
+    )
+
+    if not already_exists:
+        reviewed["format_issues"].append(issue)
+
+    return refresh_review_summary(reviewed)
+
+
 def add_duplicate_answer_sentence_issue(reviewed: dict, question_data: dict) -> dict:
     explanation = question_data.get("data", {}).get("explanation", "") or ""
 
@@ -1052,6 +1420,7 @@ def review_single_raw_file_task(
     selected_checks: dict[str, Any],
     run_content: bool,
     run_format: bool,
+    run_pt_teacher_tip: bool,
     cancel_checker=None,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     """
@@ -1064,7 +1433,7 @@ def review_single_raw_file_task(
     with open(raw_file, "r", encoding="utf-8") as f:
         question_data = json.load(f)
 
-    if not run_content and not run_format:
+    if not run_content and not run_format and not run_pt_teacher_tip:
         selected_result = make_empty_review_result(
             question_data.get("question_id", "")
         )
@@ -1074,7 +1443,7 @@ def review_single_raw_file_task(
             timeout=120,
         )
 
-        fallback_area = "content" if run_content else "format"
+        fallback_area = "content" if (run_content or run_pt_teacher_tip) else "format"
 
         selected_result = review_one_with_retries(
             client,
@@ -1151,6 +1520,7 @@ def review_raw_files(
     selected_prompt = build_review_prompt(selected_checks)
     run_content = should_run_content_review(selected_checks)
     run_format = should_run_format_review(selected_checks)
+    run_pt_teacher_tip = should_run_pt_teacher_tip_review(selected_checks)
 
     issue_rows: list[dict[str, Any]] = []
     reviewed_results: list[dict[str, Any]] = []
@@ -1183,6 +1553,7 @@ def review_raw_files(
                         selected_checks=selected_checks,
                         run_content=run_content,
                         run_format=run_format,
+                        run_pt_teacher_tip=run_pt_teacher_tip,
                         cancel_checker=cancel_checker,
                     )
                     review_payloads[raw_file] = (question_data, selected_result)
@@ -1201,6 +1572,7 @@ def review_raw_files(
                         selected_checks,
                         run_content,
                         run_format,
+                        run_pt_teacher_tip,
                         cancel_checker,
                     ): raw_file
                     for raw_file in raw_paths
@@ -1266,6 +1638,15 @@ def review_raw_files(
                 )
                 merged = filter_no_issue_entries(merged)
                 merged = filter_quote_false_positive_issues(merged)
+                merged = filter_pt_teacher_tip_rate_rounding_issues(merged, question_data)
+                merged = add_pt_teacher_tip_static_issues(merged, question_data, selected_checks)
+
+
+                if is_check_enabled(selected_checks, "format", "start_sentence"):
+                    merged = add_start_sentence_format_issue(merged, question_data)
+
+                if is_check_enabled(selected_checks, "format", "conclusion_sentence"):
+                    merged = add_conclusion_sentence_issue(merged, question_data)
 
                 if is_check_enabled(selected_checks, "format", "duplicate_answer_sentence"):
                     merged = add_duplicate_answer_sentence_issue(merged, question_data)
