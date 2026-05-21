@@ -340,9 +340,10 @@ const REVIEW_CHECK_GROUPS = {
       description: "해설이 학습자에게 노출하기에 자연스러운 존댓말인지 확인합니다.",
     },
     long_explanation_manual_check: {
-      label: "긴 해설 수동 검토",
+      label: "해설 수식/긴 해설 수동 검토",
       keys: ["long_explanation_manual_check"],
-      description: "해설이 너무 길어 스크린샷 검증이 제한된 경우 형식 검수 항목으로 표시합니다.",
+      description:
+        "해설에 수식, LaTeX, MathJax, 표, 이미지가 있어 스크린샷 캡처를 시도했지만, 0.8배까지 축소해도 한 화면에 들어오지 않거나 캡처가 실패/스킵된 경우 수동 검토 항목으로 표시합니다.",
     },
   },
 };
@@ -368,7 +369,7 @@ const REVIEW_FORMAT_CHECK_DESCRIPTIONS = {
   quote_rules: "SQL 문자열이나 선지 원문 때문에 따옴표가 중첩된 정상 케이스를 오류로 보지 않게 합니다.",
   duplicate_answer_sentence: "해설 시작 외 위치에 '정답은 X번입니다.' 문장이 반복되는지 확인합니다.",
   markdown_error: "사용자 노출 해설에 백틱(`) 또는 Markdown 굵게 표시(**)가 남았는지 확인합니다.",
-  long_explanation_manual_check: "해설이 너무 길어 스크린샷 검증이 제한된 경우 수동 검토 항목으로 표시합니다.",
+  long_explanation_manual_check: "해설에 수식, LaTeX, MathJax, 표, 이미지가 있어 스크린샷 캡처를 시도했지만, 해설이 길어 한 화면 캡처가 불가능한 경우 수동 검토 항목으로 표시합니다.",
 };
 
 const DEFAULT_TARGET_MAP_FORM = {
@@ -914,6 +915,11 @@ function mapQuestion(item, index) {
   // 문제 엑셀의 subject/과목에는 강좌명이나 1과목/2과목 같은 값이 들어갈 수 있어서,
   // 백엔드가 CD 매핑으로 만든 subject_name만 화면에 표시합니다.
   const subjectName = pick(item, ["subject_name", "subjectName"], "");
+  const targetCourseName = pick(item, ["target_course_name", "targetCourseName"], "");
+  const targetSetName = pick(item, ["target_set_name", "targetSetName"], "");
+  const targetSubjectName = pick(item, ["target_subject_name", "targetSubjectName"], "");
+  const targetSubtypeName = pick(item, ["target_subtype_name", "targetSubtypeName"], "");
+
 
   const courseName = pick(
     merged,
@@ -951,7 +957,7 @@ function mapQuestion(item, index) {
   );
 
   return {
-    rowKey: `${id}-${index}`,
+    rowKey: `question-${id}`,
     id: toText(id),
     courseName: toText(courseName, ""),
     setName: toText(setName, ""),
@@ -979,6 +985,10 @@ function mapQuestion(item, index) {
     reviewScopeSummary: toText(pick(merged, ["review_scope_summary", "reviewScopeSummary", "검수범위"], ""), ""),
     reviewCheckHistory: parseJsonArray(pick(merged, ["review_check_history", "reviewCheckHistory"], "")),
     raw: merged,
+    targetCourseName: toText(targetCourseName, ""),
+    targetSetName: toText(targetSetName, ""),
+    targetSubjectName: toText(targetSubjectName, ""),
+    targetSubtypeName: toText(targetSubtypeName, ""),
   };
 }
 
@@ -1245,24 +1255,38 @@ function App() {
         const row = mapQuestion(item, index);
         const examUniqueNo = String(row.examUniqueNo || "").trim();
 
+        const targetCourseName =
+          row.targetCourseName ||
+          courseByExamUniqueNo.get(examUniqueNo) ||
+          row.courseName ||
+          "";
+
+        const targetSetName =
+          row.targetSetName ||
+          setByExamUniqueNo.get(examUniqueNo) ||
+          row.setName ||
+          "";
+
+        const targetSubjectName =
+          row.targetSubjectName ||
+          subjectByExamUniqueNo.get(examUniqueNo) ||
+          "";
+
+        const targetSubtypeName =
+          row.targetSubtypeName ||
+          subtypeByExamUniqueNo.get(examUniqueNo) ||
+          "";
+
         return {
           ...row,
-          courseName:
-            row.courseName ||
-            courseByExamUniqueNo.get(examUniqueNo) ||
-            "",
-          setName:
-            row.setName ||
-            setByExamUniqueNo.get(examUniqueNo) ||
-            "",
-          subjectName:
-            row.subjectName ||
-            subjectByExamUniqueNo.get(examUniqueNo) ||
-            "",
-          subtypeName:
-            row.subtypeName ||
-            subtypeByExamUniqueNo.get(examUniqueNo) ||
-            "",
+          courseName: row.courseName || targetCourseName,
+          setName: row.setName || targetSetName,
+
+          // 검색 조건용 매핑값
+          targetCourseName,
+          targetSetName,
+          targetSubjectName,
+          targetSubtypeName,
         };
       })
       .sort(compareQuestionRows);
@@ -1299,17 +1323,76 @@ function App() {
     return compareNatural(a.id, b.id);
   }
 
-  const options = useMemo(() => ({
-    courseName: makeCourseOptions(rows),
-    setName: makeTextOptions(rows, "setName"),
-    examUniqueNo: makeOptions(rows, "examUniqueNo"),
-    subjectName: makeSubjectOptions(rows),
-    subtypeName: makeTextOptions(rows, "subtypeName"),
-    cdValue: makeOptions(rows, "cdValue", true),
-    reviewStatus: makeOptions(rows, "reviewStatus"),
-    errorType: makeErrorTypeOptions(rows),
-    reflectStatus: makeOptions(rows, "reflectStatus"),
-  }), [rows]);
+  const matchesFilterValue = (rowValue, filterValue) => {
+    if (!filterValue || filterValue === "전체") return true;
+    return (String(rowValue || "").trim() || "미지정") === filterValue;
+  };
+
+  const getRowsByHierarchy = ({ courseName, setName, subjectName, subtypeName, examUniqueNo } = {}) => {
+    return rows.filter((row) => {
+      const rowCourseName = String(row.targetCourseName || row.courseName || "").trim() || "미지정";
+      const rowSetName = String(row.targetSetName || row.setName || "").trim() || "미지정";
+      const rowSubjectName = String(row.targetSubjectName || "").trim() || "미지정";
+      const rowSubtypeName = String(row.targetSubtypeName || "").trim() || "미지정";
+
+      return matchesFilterValue(rowCourseName, courseName) &&
+        matchesFilterValue(rowSetName, setName) &&
+        matchesFilterValue(rowSubjectName, subjectName) &&
+        matchesFilterValue(rowSubtypeName, subtypeName) &&
+        matchesFilterValue(row.examUniqueNo, examUniqueNo);
+    });
+  };
+
+  const options = useMemo(() => {
+    const setRows = getRowsByHierarchy({
+      courseName: filters.courseName,
+    });
+
+    const subjectRows = getRowsByHierarchy({
+      courseName: filters.courseName,
+      setName: filters.setName,
+    });
+
+    const subtypeRows = getRowsByHierarchy({
+      courseName: filters.courseName,
+      setName: filters.setName,
+      subjectName: filters.subjectName,
+    });
+
+    const examRows = getRowsByHierarchy({
+      courseName: filters.courseName,
+      setName: filters.setName,
+      subjectName: filters.subjectName,
+      subtypeName: filters.subtypeName,
+    });
+
+    const cdRows = getRowsByHierarchy({
+      courseName: filters.courseName,
+      setName: filters.setName,
+      subjectName: filters.subjectName,
+      subtypeName: filters.subtypeName,
+      examUniqueNo: filters.examUniqueNo,
+    });
+
+    return {
+      courseName: makeTextOptions(rows, "targetCourseName"),
+      setName: makeTextOptions(setRows, "targetSetName"),
+      examUniqueNo: makeOptions(examRows, "examUniqueNo"),
+      subjectName: makeTextOptions(subjectRows, "targetSubjectName"),
+      subtypeName: makeTextOptions(subtypeRows, "targetSubtypeName"),
+      cdValue: makeOptions(cdRows, "cdValue", true),
+      reviewStatus: makeOptions(rows, "reviewStatus"),
+      errorType: makeErrorTypeOptions(rows),
+      reflectStatus: makeOptions(rows, "reflectStatus"),
+    };
+  }, [
+    rows,
+    filters.courseName,
+    filters.setName,
+    filters.subjectName,
+    filters.subtypeName,
+    filters.examUniqueNo,
+  ]);
 
   const filteredRows = useMemo(() => {
     const keyword = lower(filters.search);
@@ -1342,13 +1425,16 @@ function App() {
       ].join(" "));
 
       const matchExamUniqueNo = filters.examUniqueNo === "전체" || row.examUniqueNo === filters.examUniqueNo;
-      const rowSubjectName = String(row.subjectName || "").trim() || "미지정";
-      const matchSubjectName = filters.subjectName === "전체" || rowSubjectName === filters.subjectName;
-      const rowCourseName = String(row.courseName || "").trim() || "미지정";
+      const rowCourseName = String(row.targetCourseName || row.courseName || "").trim() || "미지정";
       const matchCourseName = filters.courseName === "전체" || rowCourseName === filters.courseName;
-      const rowSetName = String(row.setName || "").trim() || "미지정";
+
+      const rowSetName = String(row.targetSetName || row.setName || "").trim() || "미지정";
       const matchSetName = filters.setName === "전체" || rowSetName === filters.setName;
-      const rowSubtypeName = String(row.subtypeName || "").trim() || "미지정";
+
+      const rowSubjectName = String(row.targetSubjectName || "").trim() || "미지정";
+      const matchSubjectName = filters.subjectName === "전체" || rowSubjectName === filters.subjectName;
+
+      const rowSubtypeName = String(row.targetSubtypeName || "").trim() || "미지정";
       const matchSubtypeName = filters.subtypeName === "전체" || rowSubtypeName === filters.subtypeName;
       const matchCdValue = filters.cdValue === "전체" || row.cdValue === filters.cdValue;
       const matchReviewStatus = filters.reviewStatus === "전체" || row.reviewStatus === filters.reviewStatus;
@@ -1406,7 +1492,45 @@ function App() {
 
   const handleFilterChange = (event) => {
     const { name, value } = event.target;
-    setFilters((prev) => ({ ...prev, [name]: value }));
+
+    setFilters((prev) => {
+      const next = { ...prev, [name]: value };
+
+      // 상위 조건이 바뀌면 하위 조건을 초기화합니다.
+      // 강좌명 → 세트명 → 과목명 → 하위유형 순서로 종속 옵션이 다시 계산됩니다.
+      if (name === "courseName") {
+        next.setName = "전체";
+        next.subjectName = "전체";
+        next.subtypeName = "전체";
+        next.examUniqueNo = "전체";
+        next.cdValue = "전체";
+      }
+
+      if (name === "setName") {
+        next.subjectName = "전체";
+        next.subtypeName = "전체";
+        next.examUniqueNo = "전체";
+        next.cdValue = "전체";
+      }
+
+      if (name === "subjectName") {
+        next.subtypeName = "전체";
+        next.examUniqueNo = "전체";
+        next.cdValue = "전체";
+      }
+
+      if (name === "subtypeName") {
+        next.examUniqueNo = "전체";
+        next.cdValue = "전체";
+      }
+
+      if (name === "examUniqueNo") {
+        next.cdValue = "전체";
+      }
+
+      return next;
+    });
+
     setCurrentPage(1);
   };
 
@@ -1416,29 +1540,32 @@ function App() {
     setCurrentPage(1);
   };
 
-  const toggleAll = (checked, visibleRows) => {
-    setReviewCurrentPage(1);
+  const toggleAll = (checked, targetRows = []) => {
+    const targetKeys = targetRows
+      .map((row) => row.rowKey)
+      .filter(Boolean);
 
-    if (checked) {
-      const next = visibleRows.map((row) => row.rowKey);
-      setSelectedRows(next);
-      setReviewTarget((prev) => ({
-        ...prev,
+    setSelectedRows((prev) => {
+      const nextSet = new Set(prev);
+
+      if (checked) {
+        targetKeys.forEach((key) => nextSet.add(key));
+      } else {
+        targetKeys.forEach((key) => nextSet.delete(key));
+      }
+
+      const next = Array.from(nextSet);
+
+      setReviewTarget((targetPrev) => ({
+        ...targetPrev,
         targetScope: next.length > 0 ? "selected" : "filtered",
       }));
-      return;
-    }
 
-    setSelectedRows([]);
-    setReviewTarget((prev) => ({
-      ...prev,
-      targetScope: "filtered",
-    }));
+      return next;
+    });
   };
 
   const toggleRow = (rowKey) => {
-    setReviewCurrentPage(1);
-
     setSelectedRows((prev) => {
       const next = prev.includes(rowKey)
         ? prev.filter((key) => key !== rowKey)
@@ -1639,12 +1766,7 @@ const saveTargetMap = async () => {
     alert("강좌명을 입력해 주세요.");
     return;
   }
-
-  if (!setName) {
-    alert("세트명을 입력해 주세요.");
-    return;
-  }
-
+  
   if (!subjectName) {
     alert("과목명을 입력해 주세요.");
     return;
@@ -1910,7 +2032,7 @@ const targetSubtypeOptions = useMemo(() => {
     }
   }, [reviewCurrentPage, reviewTargetTotalPages]);
 
-  const buildReviewPayloadForMap = (targetMap, targetRows) => {
+  const buildReviewPayloadForMap = (targetMap, targetRows, runContext = {}) => {
     const numbers = targetRows
       .map((row) => toNumber(row.number))
       .filter((value) => value !== null)
@@ -1924,11 +2046,14 @@ const targetSubtypeOptions = useMemo(() => {
     const questionRange = manualQuestionRange || "all";
     const defaultExamUniqueNo = String(targetMap.exam_unique_no || "").trim();
 
+    const shouldUseDirectQuestionNumbers =
+      runContext.mode === "selected" || Boolean(runContext.statusFilter);
+
     if (!defaultExamUniqueNo) {
       throw new Error("시험 고유 번호가 없는 매핑입니다.");
     }
 
-    return {
+    const payload = {
       course_name: String(targetMap.course_name || "").trim(),
       set_name: String(targetMap.set_name || "").trim(),
       subject_name: String(targetMap.subject_name || "").trim() || undefined,
@@ -1938,7 +2063,6 @@ const targetSubtypeOptions = useMemo(() => {
       subject_start_index: Number(targetMap.subject_start_index) || 1,
       subject_end_index: Number(targetMap.subject_end_index) || 1,
       question_range: questionRange,
-      question_numbers: numbers,
       questions: targetRows.map((row) => ({
         site_question_id: toNumber(row.id),
         exam_unique_no: defaultExamUniqueNo,
@@ -1946,10 +2070,16 @@ const targetSubtypeOptions = useMemo(() => {
       })),
       options: {
         headless: true,
-        write_excel: false,
+        write_excel: true,
         include_raw_data: false,
       },
     };
+
+    if (shouldUseDirectQuestionNumbers) {
+      payload.question_numbers = numbers;
+    }
+
+    return payload;
   };
 
   const buildDirectCollectReviewPayload = () => {
@@ -1962,6 +2092,9 @@ const targetSubtypeOptions = useMemo(() => {
 
     if (!courseName) {
       throw new Error("강좌명을 입력해 주세요.");
+    }
+    if (!setName) {
+      throw new Error("세트명을 입력해 주세요.");
     }
 
     return {
@@ -1977,7 +2110,7 @@ const targetSubtypeOptions = useMemo(() => {
       checks: normalizeReviewChecksForPayload(reviewChecks),
       options: {
         headless: true,
-        write_excel: false,
+        write_excel: true,
         include_raw_data: true,
         save_collected_to_db: true,
         review_checks: normalizeReviewChecksForPayload(reviewChecks),
@@ -1985,9 +2118,9 @@ const targetSubtypeOptions = useMemo(() => {
     };
   };
 
-  const buildCombinedReviewPayload = (jobTargets) => {
+  const buildCombinedReviewPayload = (jobTargets, runContext = {}) => {
     const targets = jobTargets.map(({ targetMap, rowsForMap }) =>
-      buildReviewPayloadForMap(targetMap, rowsForMap)
+      buildReviewPayloadForMap(targetMap, rowsForMap, runContext)
     );
 
     const configs = targets.map(({ options, ...config }) => config);
@@ -2000,7 +2133,7 @@ const targetSubtypeOptions = useMemo(() => {
       checks: normalizeReviewChecksForPayload(reviewChecks),
       options: {
         headless: true,
-        write_excel: false,
+        write_excel: true,
         include_raw_data: false,
         review_checks: normalizeReviewChecksForPayload(reviewChecks),
       },
@@ -2367,7 +2500,7 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
     let totalMappingErrors = 0;
 
       try {
-        const payload = buildCombinedReviewPayload(jobTargets);
+        const payload = buildCombinedReviewPayload(jobTargets, { mode, statusFilter });
 
         const createRes = await fetch(`${baseUrl}/review-jobs`, {
           method: "POST",
@@ -2512,7 +2645,31 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
   };
 
 
-  const saveReview = async (nextStatus) => {
+  const getCurrentReviewNavigationRows = () => {
+    // 검수 화면에서는 검수 대상 문제 내역 기준,
+    // 문제 목록 검색 화면에서는 현재 검색/필터 결과 기준으로 다음 문제를 찾습니다.
+    return pageMode === "review" ? reviewTargetRows : filteredRows;
+  };
+
+  const getNextReviewRow = (currentRow = reviewQuestion) => {
+    if (!currentRow) return null;
+
+    const navigationRows = getCurrentReviewNavigationRows();
+    const currentKey = currentRow.rowKey;
+    const currentId = String(currentRow.id || "");
+
+    const currentIndex = navigationRows.findIndex((row) =>
+      row.rowKey === currentKey || String(row.id || "") === currentId
+    );
+
+    if (currentIndex < 0) return null;
+    return navigationRows[currentIndex + 1] || null;
+  };
+
+  const hasNextReviewQuestion = Boolean(getNextReviewRow());
+
+  const saveReview = async (nextStatus, options = {}) => {
+    const { moveNext = false } = options;
     if (!editForm?.id) {
       alert("저장할 문제 ID가 없습니다.");
       return;
@@ -2553,8 +2710,20 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
         throw new Error("DB 저장 실패");
       }
 
+      const nextRow = moveNext ? getNextReviewRow() : null;
+
       await fetchQuestions();
-      closeReviewModal();
+
+      if (moveNext) {
+        if (nextRow) {
+          openReviewModal(nextRow);
+        } else {
+          closeReviewModal();
+          alert("현재 필터/목록 기준으로 다음 문제가 없습니다.");
+        }
+      } else {
+        closeReviewModal();
+      }
     } catch (error) {
       console.error(error);
       alert("저장 중 오류가 발생했습니다.");
@@ -3348,8 +3517,17 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
     );
   };
 
-  const renderQuestionTable = ({rowsToShow, title, showCount = false, totalCount = null, emptyText = "조회된 문제가 없습니다.", tableVariant = "list",}) => {
-    const allVisibleChecked = rowsToShow.length > 0 && rowsToShow.every((row) => selectedRows.includes(row.rowKey));
+  const renderQuestionTable = ({
+    rowsToShow,
+    selectableRows = null,
+    title,
+    showCount = false,
+    totalCount = null,
+    emptyText = "조회된 문제가 없습니다.",
+    tableVariant = "list",
+  }) => {
+    const targetRows = selectableRows || rowsToShow;
+    const allVisibleChecked = targetRows.length > 0 && targetRows.every((row) => selectedRows.includes(row.rowKey));
     const isTargetTable = tableVariant === "target";
     const emptyColSpan = isTargetTable ? 16 : 15;
 
@@ -3387,7 +3565,7 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
           <table className={`review-table compact-review-table ${isTargetTable ? "target-review-table" : ""}`}>
             <thead>
               <tr>
-                <th className="check-col"><input type="checkbox" checked={allVisibleChecked} onChange={(event) => toggleAll(event.target.checked, rowsToShow)} /></th>
+                <th className="check-col"><input type="checkbox" checked={allVisibleChecked} onChange={(event) => toggleAll(event.target.checked, targetRows)} /></th>
                 {isTargetTable ? (
                   <>
                     <th className="idx-col">IDX</th>
@@ -3571,6 +3749,7 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
           {renderTargetForm()}
           {renderQuestionTable({
             rowsToShow: reviewTargetPageRows,
+            selectableRows: reviewTargetRows,
             title: "검수 대상 문제 내역 ",
             tableVariant: "target",
             showCount: true,
@@ -3585,6 +3764,7 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
           {renderSearchFilters()}
           {renderQuestionTable({
             rowsToShow: pageRows,
+            selectableRows: filteredRows,
             title: "문제 목록 ",
             tableVariant: "target",
             showCount: true,
@@ -3759,6 +3939,15 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
 
                     <button type="button" className="save-dark" onClick={() => saveReview(editForm.status)}>
                       저장 후 닫기
+                    </button>
+
+                    <button
+                      type="button"
+                      className="save-blue"
+                      onClick={() => saveReview(editForm.status, { moveNext: true })}
+                      disabled={!hasNextReviewQuestion}
+                    >
+                      저장 후 다음
                     </button>
 
                     <button type="button" className="save-yellow" onClick={() => saveReview("보류")}>

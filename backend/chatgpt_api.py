@@ -25,25 +25,65 @@ from prompt_builder import (
 
 
 ROOT = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent)).resolve()
+load_dotenv(ROOT / ".env")
 
 RAW_DIR = Path(os.getenv("RAW_DIR", ROOT / "raw")).resolve()
 
 REVIEWED_DIR = Path(os.getenv("REVIEWED_DIR", ROOT / "reviewed_json")).resolve()
 
-# ISSUE_XLSX_PATH = ROOT / "json_issue_index.xlsx"
 ISSUE_XLSX_PATH = Path(os.getenv("ISSUE_XLSX_PATH", ROOT / "chatgpt.xlsx")).resolve()
 
-MODEL_NAME = os.getenv("CHATGPT_MODEL", "gpt-5.4")
+MODEL_NAME = os.getenv("CHATGPT_MODEL", "gpt-5.4").strip() or "gpt-5.4"
 MAX_TOKENS = int(os.getenv("CHATGPT_MAX_OUTPUT_TOKENS", "6000"))
-CHATGPT_REASONING_EFFORT = os.getenv("CHATGPT_REASONING_EFFORT", "medium")
+CHATGPT_REASONING_EFFORT = os.getenv("CHATGPT_REASONING_EFFORT", "medium").strip() or "medium"
 
-MAX_QUESTION_IMAGES = 2
-MAX_CHOICE_IMAGES = 4
-MAX_EXPLANATION_IMAGES = 2
+MAX_QUESTION_IMAGES = int(os.getenv("MAX_QUESTION_IMAGES", "3"))
+MAX_CHOICE_IMAGES = int(os.getenv("MAX_CHOICE_IMAGES", "4"))
+MAX_EXPLANATION_IMAGES = int(os.getenv("MAX_EXPLANATION_IMAGES", "1"))
 MAX_PER_QUESTION_API_RETRIES = 3
 MAX_CONSECUTIVE_REVIEW_FAILURES = 5
 
 MAX_REVIEW_WORKERS = int(os.getenv("MAX_REVIEW_WORKERS", "3"))
+
+
+def is_only_long_explanation_manual_check(selected_checks: dict[str, Any]) -> bool:
+    """
+    긴 해설 수동 검토만 선택된 경우입니다.
+    이 항목은 GPT 판단 없이 explanation_capture_meta만 보고 코드로 오류를 생성합니다.
+    """
+    content_checks = selected_checks.get("content", {}) or {}
+    format_checks = selected_checks.get("format", {}) or {}
+    pt_tip_checks = selected_checks.get("pt_teacher_tip", {}) or {}
+
+    if any(bool(v) for v in content_checks.values()):
+        return False
+
+    if any(bool(v) for v in pt_tip_checks.values()):
+        return False
+
+    enabled_format_keys = [
+        key
+        for key, value in format_checks.items()
+        if bool(value)
+    ]
+
+    return enabled_format_keys == ["long_explanation_manual_check"]
+
+
+def needs_openai_review(selected_checks: dict[str, Any]) -> bool:
+    """
+    GPT 호출이 필요한 검수인지 판단합니다.
+    긴 해설 수동 검토만 선택된 경우는 코드 후처리만으로 처리합니다.
+    """
+    if is_only_long_explanation_manual_check(selected_checks):
+        return False
+
+    return (
+        should_run_content_review(selected_checks)
+        or should_run_format_review(selected_checks)
+        or should_run_pt_teacher_tip_review(selected_checks)
+    )
+
 
 def get_selected_review_checks(review_checks: dict[str, Any] | None = None) -> dict[str, dict[str, bool]]:
     """프론트에서 전달한 선택 검수값을 기본값과 병합합니다."""
@@ -347,7 +387,9 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
             "[보기/제시자료 이미지 특별 검수 기준]\n"
             "- 이 문제는 보기/제시자료가 이미지로 제공될 수 있습니다.\n"
             "- problem.given_text가 비어 있거나 일부만 있어도, problem.given_images에 첨부된 이미지를 실제 보기/제시자료 원문으로 간주하세요.\n"
-            "- 보기 이미지 안의 표, 행, 열, 값, 조건, 코드, 수식, ERD, 그림을 먼저 읽고 문제 성립 여부와 정답/해설을 검수하세요.\n"
+            "- 보기 이미지 안의 표, 행, 열, 값, 조건, 코드, SQL, 수식, ERD, 그림을 먼저 읽고 문제 성립 여부와 정답/해설을 검수하세요.\n"
+            "- problem.given_text의 표가 행·열 구분 없이 붙어 보이면 텍스트만으로 오류를 만들지 말고, 첨부된 보기/제시자료 스크린샷의 표 경계와 값을 기준으로 판단하세요.\n"
+            "- SQL이 텍스트 추출 과정에서 FROMEMP, WHEREM_SAL처럼 키워드와 식별자가 붙어 보이면 즉시 문제 오류로 보지 말고, 첨부 스크린샷과 문맥을 함께 보고 FROM EMP, WHERE M_SAL처럼 정상 SQL 토큰 경계로 해석 가능한지 먼저 확인하세요.\n"
             "- 해설이 보기 이미지의 값, 조건, 표 구조, 행/열 결과와 다르면 내용 오류 또는 해설 내용 오류로 기록하세요.\n"
             "- 이미지 내용을 확정적으로 읽을 수 없으면 임의로 내용 오류를 만들지 마세요. 단, 이미지가 없거나 잘못 캡처되어 문제 풀이 자체가 불가능하면 '문제 성립 오류'로 기록하세요.\n"
             "- 보기 이미지가 문제 풀이의 핵심인데 첨부되지 않았거나 잘못 캡처되었으면 문제 성립 오류로 기록하세요.\n"
@@ -373,10 +415,30 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
 
     matching_instruction = "\n".join(matching_parts)
 
-    question_items = question_material_images
-    choice_items = choice_material_images
+    def prioritize_render_screenshots(items: list[dict]) -> list[dict]:
+        render_items = [
+            item for item in items
+            if item.get("type") == "render_screenshot"
+        ]
+        normal_items = [
+            item for item in items
+            if item.get("type") != "render_screenshot"
+        ]
+        return render_items + normal_items
+
+    question_items = prioritize_render_screenshots(question_material_images)
+    choice_items = prioritize_render_screenshots(choice_material_images)
 
     extra_instruction_parts = []
+
+    if selected_checks["content"].get("expression_error"):
+        extra_instruction_parts.append(
+            "[표현/렌더링 오류 추가 지시]\n"
+            "- 백틱(`), Markdown 잔여 문법(**, __ 등), HTML 잔여 문법, 깨진 특수문자는 텍스트 기준으로 검수하세요.\n"
+            "- 문제/보기/선지/해설에 LaTeX 또는 수식 표현이 있는 경우, 첨부된 스크린샷을 함께 보고 실제 화면에서 수식이 깨졌는지 확인하세요.\n"
+            "- 수식 원문이 텍스트에는 남아 있지만 화면 스크린샷에서 정상 수식으로 보이면 오류로 기록하지 마세요.\n"
+            "- 화면 스크린샷에서 LaTeX 명령어, 달러 기호, 백슬래시 수식 문법이 그대로 노출되면 표현/렌더링 오류로 기록하세요.\n"
+        )
 
     if mode == "content" or (mode == "selected" and run_content):
         extra_instruction_parts.append(
@@ -386,6 +448,7 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
             "- 보기/제시자료 이미지가 문제 풀이에 필수인데 없거나 잘못된 경우 반드시 문제 성립 오류로 판단하세요.\n"
             "- 보기/제시자료 이미지, 선지 이미지, 해설 스크린샷은 서로 독립적으로 검수하세요.\n"
             "- 보기/제시자료 이미지가 있는 경우 problem.given_text만 보지 말고 첨부된 problem.given_images를 실제 보기/자료 원문으로 판단하세요.\n"
+            "- problem.given_text에서 표가 붙어서 추출되거나 SQL 공백이 사라져 보이는 경우에는 그 텍스트만 근거로 문제 성립 오류를 만들지 말고, 첨부된 보기/제시자료 스크린샷을 기준으로 판단하세요.\n"
             "- 보기 이미지의 표/행/열/값/조건과 해설 또는 정답 판단이 다르면 내용 오류로 기록하세요.\n"
             "- 이미지 선지가 있는 경우 choices의 파일명 텍스트가 아니라 첨부된 선지 이미지를 실제 선지 내용으로 판단하세요.\n"
             "- SQL 결과표 이미지 선지는 EMPNO, ID, KEY 같은 행 식별자와 SAL, AMOUNT, SCORE 같은 결과값 컬럼을 기준으로 해설의 오답 근거와 비교하세요.\n"
@@ -410,7 +473,7 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
     if mode == "selected" and run_pt_teacher_tip:
         extra_instruction_parts.append(
             "[PT쌤 합격팁 검수 추가 지시]\n"
-            "- PT쌤 합격팁 검수가 선택된 경우 pt_teacher_tip을 문제, 보기, 선지, 정답, 키워드, 비기봇 해설과 비교하세요.\n"
+            "- PT쌤 합격팁 검수가 선택된 경우 pt_teacher_tip을 문제, 보기, 선지, 정답, 비기봇 해설과 비교하세요.\n"
             "- 개념 난이도, 정답률, 유형, 선지별 정답률, 강조 선지, 강조 정답률, 출제 경향, 분석 내용이 서로 모순되는지 확인하세요.\n"
             "- answer_rate와 highlighted_rate는 소수점 제외 또는 반올림 후 숫자가 같으면 오류로 보지 마세요.\n"
             "- 문제 데이터만으로 확인할 수 없는 실제 기출 출제 횟수의 진위는 오류로 기록하지 마세요.\n"
@@ -466,6 +529,7 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
         or content_checks.get("answer_validation")
         or content_checks.get("answer_correctness")
         or content_checks.get("explanation_logic")
+        or content_checks.get("expression_error")
         or run_pt_teacher_tip
     )
 
@@ -477,6 +541,7 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
         or content_checks.get("answer_validation")
         or content_checks.get("answer_correctness")
         or content_checks.get("choice_explanation_match")
+        or content_checks.get("expression_error")
         or run_pt_teacher_tip
     )
 
@@ -500,7 +565,12 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
             for idx, item in enumerate(question_items[:MAX_QUESTION_IMAGES], start=1):
                 saved_path = item.get("saved_path", "")
                 near = item.get("caption_or_near_text", "") or item.get("ocr_or_extracted_text", "")
-                label = f"보기/제시자료 이미지 {idx}"
+                image_type = item.get("type", "")
+
+                if image_type == "render_screenshot":
+                    label = f"보기/제시자료 수식 렌더링 스크린샷 {idx}"
+                else:
+                    label = f"보기/제시자료 이미지 {idx}"
                 if near:
                     label += f" / {near}"
                 blocks.extend(make_image_block(saved_path, label))
@@ -515,7 +585,12 @@ def build_user_content(prompt: str, question_data: dict, mode: str, review_check
             for idx, item in enumerate(choice_items[:MAX_CHOICE_IMAGES], start=1):
                 saved_path = item.get("saved_path", "")
                 near = item.get("caption_or_near_text", "") or item.get("ocr_or_extracted_text", "")
-                label = f"선지 이미지 {idx}"
+                image_type = item.get("type", "")
+
+                if image_type == "render_screenshot":
+                    label = f"선지 수식 렌더링 스크린샷 {idx}"
+                else:
+                    label = f"선지 이미지 {idx}"
                 if near:
                     label += f" / {near}"
                 blocks.extend(make_image_block(saved_path, label))
@@ -611,6 +686,7 @@ VALID_REVIEW_ISSUE_TYPES = {
     "최종 문장 형식 오류",
     "기타 형식 오류",
     "긴 해설 수동 검토 필요",
+    "PT쌤 합격팁 오류",
 }
 
 
@@ -1130,6 +1206,176 @@ def add_pt_teacher_tip_static_issues(
 
     return refresh_review_summary(reviewed)
 
+def normalize_quote_check_text(value: Any) -> str:
+    """
+    작은따옴표 짝 검사용 텍스트 정리.
+    - ‘ ’ 같은 스마트 따옴표를 일반 작은따옴표로 통일
+    - 영어 축약형 don't 같은 경우는 따옴표 검수에서 제외
+    - SQL의 escaped quote인 ''는 한 쌍으로 보고 제외
+    """
+    text = str(value or "")
+    text = text.replace("‘", "'").replace("’", "'")
+
+    # 영어 축약형 don't, can't 등은 검수 제외
+    text = re.sub(r"(?<=[A-Za-z])'(?=[A-Za-z])", "", text)
+
+    # SQL/컴활/DB에서 문자열 내부 작은따옴표 escape로 쓰는 ''는 한 쌍이므로 제외
+    text = text.replace("''", "")
+
+    return text
+
+
+def has_unbalanced_single_quote(value: Any) -> bool:
+    text = normalize_quote_check_text(value)
+
+    if not text.strip():
+        return False
+
+    return text.count("'") % 2 == 1
+
+
+def make_quote_issue_snippet(value: Any, max_len: int = 140) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+
+    if len(text) <= max_len:
+        return text
+
+    first_quote = text.find("'")
+
+    if first_quote < 0:
+        return text[:max_len] + "..."
+
+    start = max(0, first_quote - 50)
+    end = min(len(text), first_quote + max_len - 50)
+
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+
+    return prefix + text[start:end] + suffix
+
+
+def find_simple_quote_fix_examples(value: Any) -> list[str]:
+    """
+    예:
+    강의' 엔터티 -> '강의' 엔터티
+    """
+    text = str(value or "")
+
+    context_words = (
+        "엔터티|속성|테이블|릴레이션|관계|컬럼|필드|함수|시트|워크시트|셀|파일|"
+        "쿼리|폼|보고서|컨트롤|개체|항목|변수|상수|메서드|프로시저"
+    )
+
+    pattern = rf"(?<!')([가-힣A-Za-z0-9_]+)'\s+({context_words})"
+
+    examples = []
+
+    for match in re.finditer(pattern, text):
+        term = match.group(1)
+        label = match.group(2)
+        before = f"{term}' {label}"
+        after = f"'{term}' {label}"
+        example = f"{before} → {after}"
+
+        if example not in examples:
+            examples.append(example)
+
+    return examples[:3]
+
+
+def validate_unbalanced_single_quotes(question_data: dict) -> list[dict[str, str]]:
+    """
+    문제/보기/선지/해설에서 작은따옴표 짝이 맞지 않는 경우를 코드로 확정 검수합니다.
+    """
+    data = question_data.get("data", {}) or {}
+
+    targets: list[tuple[str, Any]] = []
+
+    if data.get("body"):
+        targets.append(("문제", data.get("body")))
+
+    if data.get("extra_text"):
+        targets.append(("보기", data.get("extra_text")))
+
+    for idx, choice in enumerate(data.get("choices", []) or [], start=1):
+        targets.append((f"선지 {idx}", choice))
+
+    if data.get("explanation"):
+        targets.append(("해설", data.get("explanation")))
+
+    problem_parts = []
+    fix_examples = []
+
+    for label, text in targets:
+        if not has_unbalanced_single_quote(text):
+            continue
+
+        snippet = make_quote_issue_snippet(text)
+        problem_parts.append(f"{label}: \"{snippet}\"")
+
+        for example in find_simple_quote_fix_examples(text):
+            if example not in fix_examples:
+                fix_examples.append(example)
+
+    if not problem_parts:
+        return []
+
+    reason = (
+        "작은따옴표가 열고 닫히는 짝을 이루지 않는 문장이 있습니다. "
+        + " / ".join(problem_parts[:3])
+    )
+
+    if fix_examples:
+        suggestion = (
+            "작은따옴표가 용어의 앞뒤에 모두 오도록 수정하세요. "
+            + "예: "
+            + ", ".join(fix_examples)
+        )
+    else:
+        suggestion = "작은따옴표가 열고 닫히는 짝을 이루도록 누락된 작은따옴표를 추가하거나 불필요한 작은따옴표를 제거하세요."
+
+    return [{
+        "type": "표현/렌더링 오류",
+        "reason": reason,
+        "suggestion": suggestion,
+    }]
+
+
+def add_unbalanced_single_quote_static_issues(
+    reviewed: dict,
+    question_data: dict,
+    selected_checks: dict[str, Any],
+) -> dict:
+    """
+    표현/렌더링 오류 검수가 선택된 경우,
+    GPT가 놓친 작은따옴표 짝 누락을 코드로 추가합니다.
+    """
+    if not is_check_enabled(selected_checks, "content", "expression_error"):
+        return reviewed
+
+    static_issues = validate_unbalanced_single_quotes(question_data)
+
+    if not static_issues:
+        return reviewed
+
+    reviewed.setdefault("content_issues", [])
+
+    existing_text = " ".join(
+        str(issue.get("type", "")) + " " +
+        str(issue.get("reason", "")) + " " +
+        str(issue.get("suggestion", ""))
+        for issue in reviewed.get("content_issues", []) or []
+    )
+
+    # GPT가 이미 작은따옴표 오류를 잡았다면 중복 추가하지 않습니다.
+    if "작은따옴표" in existing_text and "표현/렌더링 오류" in existing_text:
+        return refresh_review_summary(reviewed)
+
+    reviewed["content_issues"].extend(static_issues)
+    reviewed["content_issues"] = dedupe_issues(reviewed.get("content_issues", []))
+
+    return refresh_review_summary(reviewed)
+
 
 def add_start_sentence_format_issue(reviewed: dict, question_data: dict) -> dict:
     explanation = question_data.get("data", {}).get("explanation", "") or ""
@@ -1421,6 +1667,7 @@ def review_single_raw_file_task(
     run_content: bool,
     run_format: bool,
     run_pt_teacher_tip: bool,
+    use_openai_api: bool,
     cancel_checker=None,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     """
@@ -1433,7 +1680,11 @@ def review_single_raw_file_task(
     with open(raw_file, "r", encoding="utf-8") as f:
         question_data = json.load(f)
 
-    if not run_content and not run_format and not run_pt_teacher_tip:
+    if not use_openai_api:
+        selected_result = make_empty_review_result(
+            question_data.get("question_id", "")
+        )
+    elif not run_content and not run_format and not run_pt_teacher_tip:
         selected_result = make_empty_review_result(
             question_data.get("question_id", "")
         )
@@ -1512,15 +1763,21 @@ def review_raw_files(
 
     load_dotenv(ROOT / ".env")
 
-    api_key = os.getenv("CHATGPT_API_KEY")
-    if not api_key:
-        raise RuntimeError("환경변수 CHATGPT_API_KEY가 필요합니다.")
-
     selected_checks = get_selected_review_checks(review_checks)
-    selected_prompt = build_review_prompt(selected_checks)
+    use_openai_api = needs_openai_review(selected_checks)
+
+    selected_prompt = build_review_prompt(selected_checks) if use_openai_api else ""
+
     run_content = should_run_content_review(selected_checks)
     run_format = should_run_format_review(selected_checks)
     run_pt_teacher_tip = should_run_pt_teacher_tip_review(selected_checks)
+
+    api_key = ""
+
+    if use_openai_api:
+        api_key = os.getenv("CHATGPT_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("환경변수 CHATGPT_API_KEY가 필요합니다.")
 
     issue_rows: list[dict[str, Any]] = []
     reviewed_results: list[dict[str, Any]] = []
@@ -1554,6 +1811,7 @@ def review_raw_files(
                         run_content=run_content,
                         run_format=run_format,
                         run_pt_teacher_tip=run_pt_teacher_tip,
+                        use_openai_api=use_openai_api,
                         cancel_checker=cancel_checker,
                     )
                     review_payloads[raw_file] = (question_data, selected_result)
@@ -1573,6 +1831,7 @@ def review_raw_files(
                         run_content,
                         run_format,
                         run_pt_teacher_tip,
+                        use_openai_api,
                         cancel_checker,
                     ): raw_file
                     for raw_file in raw_paths
@@ -1640,6 +1899,7 @@ def review_raw_files(
                 merged = filter_quote_false_positive_issues(merged)
                 merged = filter_pt_teacher_tip_rate_rounding_issues(merged, question_data)
                 merged = add_pt_teacher_tip_static_issues(merged, question_data, selected_checks)
+                merged = add_unbalanced_single_quote_static_issues(merged, question_data, selected_checks)
 
 
                 if is_check_enabled(selected_checks, "format", "start_sentence"):

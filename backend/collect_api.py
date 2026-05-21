@@ -2,7 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
-from urllib.parse import urlparse, urljoin, parse_qs
+from urllib.parse import urlparse, urljoin, parse_qs, parse_qsl, urlencode, urlunparse
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -19,6 +19,29 @@ RAW_DIR = Path(os.getenv("RAW_DIR", ROOT / "raw")).resolve()
 DEBUG_DIR = Path(os.getenv("DEBUG_DIR", ROOT / "debug")).resolve()
 DEBUG_ENABLED = os.getenv("DEBUG_ENABLED", "false").lower() == "true"
 DEBUG_SAVE_KEYWORDS = ("fail", "error", "not_found", "timeout", "failed")
+
+VERBOSE_COLLECT = os.getenv("VERBOSE_COLLECT", "false").lower() == "true"
+PROGRESS_LOG = os.getenv("PROGRESS_LOG", "true").lower() == "true"
+
+
+def debug_log(message: str):
+    """
+    반복 디버그 로그용.
+    VERBOSE_COLLECT=true일 때만 출력합니다.
+    """
+    if VERBOSE_COLLECT:
+        print(message)
+
+
+def progress_log(message: str):
+    """
+    진행 상황 로그용.
+    PROGRESS_LOG=false이면 진행 로그도 숨깁니다.
+    오류/경고/RAW 저장 로그는 기존 print 그대로 둡니다.
+    """
+    if PROGRESS_LOG:
+        print(message)
+
 
 IMG_DIR = Path(os.getenv("IMG_DIR", ROOT / "images")).resolve()
 
@@ -91,7 +114,11 @@ def normalize_target_configs(target: dict[str, Any] | list[dict[str, Any]]) -> l
     cfg = dict(target)
 
     questions = cfg.get("questions")
-    if isinstance(questions, list) and questions:
+    question_range = str(cfg.get("question_range") or "").strip().lower()
+
+    # question_range가 all이면 questions가 있어도 직접 이동용 question_numbers로 변환하지 않습니다.
+    # 즉, all 수집은 다음 버튼 순회 방식으로 처리합니다.
+    if question_range != "all" and isinstance(questions, list) and questions:
         nums = []
         for q in questions:
             if not isinstance(q, dict):
@@ -114,18 +141,26 @@ def parse_question_selection(cfg: dict[str, Any]):
     - selected_set이 None이면 start~end 범위 전체 저장
     - selected_set이 set이면 해당 문제 번호만 저장
     """
+
+    # 1순위: question_numbers가 있으면 선택 문제 수집
+    # question_range가 all이어도 체크 선택 문제라면 question_numbers를 우선합니다.
     qnums = cfg.get("question_numbers")
     if qnums:
         nums = sorted({int(x) for x in qnums})
         return set(nums), nums[0], nums[-1]
 
-    qrange = parse_question_range(cfg["question_range"])
+    # 2순위: question_numbers가 없을 때만 question_range 사용
+    question_range = str(cfg.get("question_range") or "all").strip().lower()
+
+    if question_range == "all":
+        return None, 1, 9999
+
+    qrange = parse_question_range(question_range)
     if qrange is None:
         return None, 1, 9999
 
     start_no, end_no = qrange
     return None, start_no, end_no
-
 
 def should_save_question(question_no: int, selected_set, start_no: int, end_no: int) -> bool:
     if selected_set is not None:
@@ -178,6 +213,49 @@ def make_empty_pt_teacher_tip() -> dict:
         "has_tip": False,
     }
 
+
+def make_not_attempted_explanation_capture_meta() -> dict:
+    return {
+        "attempted": False,
+        "zoom_applied": False,
+        "fits_in_single_before_zoom": None,
+        "fits_in_single_after_zoom": None,
+        "needs_manual_review": False,
+        "capture_mode": "not_attempted",
+        "image_count": 0,
+    }
+
+
+def make_not_needed_explanation_capture_meta() -> dict:
+    return {
+        "attempted": False,
+        "zoom_applied": False,
+        "fits_in_single_before_zoom": None,
+        "fits_in_single_after_zoom": None,
+        "needs_manual_review": False,
+        "capture_mode": "not_needed",
+        "image_count": 0,
+    }
+
+
+def make_not_attempted_question_image_capture_meta() -> dict:
+    return {
+        "attempted": False,
+        "needs_manual_review": False,
+        "capture_mode": "not_attempted",
+        "image_count": 0,
+        "failed_indexes": [],
+    }
+
+
+def get_collect_options(cfg: dict[str, Any]) -> dict[str, Any]:
+    options = cfg.get("options") or {}
+    return (
+        cfg.get("collect_options")
+        or options.get("collect_options")
+        or {}
+    )
+    
 
 def normalize_card_text(value: str) -> str:
     value = value or ""
@@ -505,17 +583,16 @@ def handle_resume_popup(page):
     print("[진입] 이어서 보기 팝업 확인 중...")
 
     try:
-        page.wait_for_timeout(1000)
-        btns = page.locator("div.cp1write2 button.m-init1:visible")
-        count = btns.count()
+        btn = page.locator("div.cp1write2 button.m-init1:visible").first
 
-        if count == 0:
+        try:
+            btn.wait_for(state="visible", timeout=700)
+        except Exception:
             print("[정보] 이어보기 팝업 없음 - 바로 문제 진입 케이스")
             return False
 
-        btn = btns.first
         btn.click(timeout=3000, force=True)
-        page.wait_for_timeout(1500)
+        wait_for_question_ready(page, timeout=8000)
         print("[성공] '1번부터 보기' 클릭")
         return True
 
@@ -612,12 +689,16 @@ def click_subject_target(page, target):
 
             btn_text = (btn.text_content() or "").strip()
             btn_text = re.sub(r"\s+", " ", btn_text)
-            print(f"[디버그] '{target['subject_name']}' 버튼 문구: {btn_text}")
+            debug_log(f"[디버그] '{target['subject_name']}' 버튼 문구: {btn_text}")
 
             btn.click(timeout=3000, force=True)
-            page.wait_for_timeout(1500)
             print(f"[성공] 상위 과목 클릭: {target['subject_name']}")
             handle_resume_popup(page)
+
+            if not wait_for_question_ready(page, timeout=8000):
+                print("[경고] 과목 클릭 후 문제 화면 준비 확인 실패")
+                return False
+
             return True
 
         # 하위 카드 있는 구조
@@ -653,12 +734,16 @@ def click_subject_target(page, target):
 
         btn_text = (btn.text_content() or "").strip()
         btn_text = re.sub(r"\s+", " ", btn_text)
-        print(f"[디버그] 하위 카드 '{sub_title}' 버튼 문구: {btn_text}")
+        debug_log(f"[디버그] 하위 카드 '{sub_title}' 버튼 문구: {btn_text}")
 
         btn.click(timeout=3000, force=True)
-        page.wait_for_timeout(1500)
         print(f"[성공] 하위 카드 클릭: {sub_title}")
         handle_resume_popup(page)
+
+        if not wait_for_question_ready(page, timeout=8000):
+            print("[경고] 과목 클릭 후 문제 화면 준비 확인 실패")
+            return False
+
         return True
 
     except Exception as e:
@@ -695,7 +780,7 @@ def is_bottom_sheet_low_enough(page):
 
         low_enough = bool(is_off) or (cont_height is not None and cont_height <= 5)
 
-        print(
+        debug_log(
             f"[디버그] 축소 판정 class={class_attr}, "
             f"is_off={is_off}, cont_height={cont_height}, low_enough={low_enough}"
         )
@@ -782,21 +867,21 @@ def ensure_bottom_sheet_collapsed(page, max_clicks=5):
         btn.wait_for(state="attached", timeout=3000)
 
         if is_bottom_sheet_low_enough(page):
-            print("[정보] 하단 시트 이미 축소 상태")
+            debug_log("[정보] 하단 시트 이미 축소 상태")
             return True
 
         for i in range(max_clicks):
-            print(f"[디버그] 하단 시트 축소 시도 {i+1}/{max_clicks}")
+            debug_log(f"[디버그] 하단 시트 축소 시도 {i+1}/{max_clicks}")
 
             try:
                 btn.click(force=True)
             except Exception as e:
                 print(f"[경고] 축소 버튼 클릭 실패: {e}")
 
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(300)
 
             if is_bottom_sheet_low_enough(page):
-                print("[성공] 하단 시트 축소 확인 완료")
+                debug_log("[성공] 하단 시트 축소 확인 완료")
                 return True
 
         print("[경고] 하단 시트를 충분히 축소하지 못함")
@@ -848,13 +933,13 @@ def ensure_bottom_sheet_expanded_from_collapsed(page, max_clicks=4):
         handle.wait_for(state="attached", timeout=3000)
 
         collapsed = ensure_bottom_sheet_collapsed(page, max_clicks=max_clicks)
-        page.wait_for_timeout(700)
+        page.wait_for_timeout(300)
 
         if not collapsed or not is_bottom_sheet_low_enough(page):
             print("[경고] 확장 전 축소 기준 상태 확보 실패")
             return False
 
-        print("[디버그] 축소 상태 확인 후 확장 시도")
+        debug_log("[디버그] 축소 상태 확인 후 확장 시도")
 
         try:
             handle.click(force=True)
@@ -862,10 +947,10 @@ def ensure_bottom_sheet_expanded_from_collapsed(page, max_clicks=4):
             print(f"[경고] 확장 버튼 클릭 실패: {e}")
             return False
 
-        page.wait_for_timeout(900)
+        page.wait_for_timeout(400)
 
         if first_four_choices_visible(page):
-            print("[성공] 축소 상태에서 한 번 더 눌러 1~4번 선지 visible 확인")
+            debug_log("[성공] 축소 상태에서 한 번 더 눌러 1~4번 선지 visible 확인")
             return True
 
         print("[경고] 확장 후에도 1~4번 선지가 모두 보이지 않음")
@@ -887,12 +972,12 @@ def wait_until_explanation_ready(page, timeout=15000):
             try:
                 text = (body.inner_text() or "").strip()
                 if text and "비기봇에게 문의중" not in text and len(text) >= 20:
-                    print("[성공] 비기봇 해설 본문 로딩 완료")
+                    debug_log("[성공] 비기봇 해설 본문 로딩 완료")
                     return True
             except Exception:
                 pass
 
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(300)
 
         print("[경고] 비기봇 해설 본문 로딩 대기 시간 초과")
         save_debug(page, "wait_until_explanation_ready_timeout")
@@ -950,7 +1035,7 @@ def explanation_fits_in_view(page, t1, viewport, bottom_margin=40, handle_overla
         hidden_bottom_px = total_height - visible_end_in_t1
         fits = visible_start_in_t1 <= 10 and hidden_bottom_px <= 5
 
-        print(
+        debug_log(
             f"[디버그] fits={fits}, guard={handle_overlap_guard}, "
             f"hidden_bottom_px={hidden_bottom_px}, "
             f"safe_bottom={safe_bottom}, "
@@ -992,7 +1077,7 @@ def element_fits_above_container(page, locator, viewport, bottom_margin=40, hand
         hidden_bottom_px = (box["y"] + box["height"]) - safe_bottom
         fits = box["y"] >= 0 and hidden_bottom_px <= 5
 
-        print(
+        debug_log(
             f"[디버그] 이미지 fits={fits}, "
             f"hidden_bottom_px={hidden_bottom_px}, "
             f"safe_bottom={safe_bottom}, "
@@ -1019,7 +1104,7 @@ def prepare_element_capture_above_container(page, locator, top_margin=80):
         return False
 
     page.mouse.wheel(0, int(box["y"] - top_margin))
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(300)
 
     fits, info = element_fits_above_container(
         page,
@@ -1035,13 +1120,13 @@ def prepare_element_capture_above_container(page, locator, top_margin=80):
     print("[정보] 이미지가 선지 container와 겹침 가능성 있음 -> 하단 시트 축소 시도")
 
     collapsed = ensure_bottom_sheet_collapsed(page, max_clicks=5)
-    page.wait_for_timeout(700)
+    page.wait_for_timeout(300)
 
     if collapsed and is_bottom_sheet_low_enough(page):
         box = locator.bounding_box()
         if box:
             page.mouse.wheel(0, int(box["y"] - top_margin))
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(300)
 
         fits, info = element_fits_above_container(
             page,
@@ -1060,10 +1145,10 @@ def prepare_element_capture_above_container(page, locator, top_margin=80):
         if not set_page_zoom(page, zoom):
             continue
 
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(300)
 
         recollapsed = ensure_bottom_sheet_collapsed(page, max_clicks=5)
-        page.wait_for_timeout(700)
+        page.wait_for_timeout(300)
 
         if not recollapsed or not is_bottom_sheet_low_enough(page):
             continue
@@ -1071,7 +1156,7 @@ def prepare_element_capture_above_container(page, locator, top_margin=80):
         box = locator.bounding_box()
         if box:
             page.mouse.wheel(0, int(box["y"] - top_margin))
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(300)
 
         fits, info = element_fits_above_container(
             page,
@@ -1089,7 +1174,297 @@ def prepare_element_capture_above_container(page, locator, top_margin=80):
     return False
 
 
-def capture_explanation_images(page, question_id):
+def capture_locator_render_screenshot(page, locator, question_id: str, label: str, location: str, near_text: str = "") -> dict | None:
+    """
+    LaTeX/수식 렌더링 확인용으로 특정 영역만 스크린샷 저장합니다.
+    location은 기존 OpenAI 첨부 흐름을 타기 위해 question 또는 choice를 사용합니다.
+    """
+    try:
+        if locator.count() == 0:
+            return None
+
+        locator.first.scroll_into_view_if_needed(timeout=3000)
+        page.wait_for_timeout(300)
+
+        filename = f"{question_id}_{norm_id_text(label)}.png"
+        filepath = IMG_DIR / filename
+
+        locator.first.screenshot(path=str(filepath), timeout=5000)
+
+        return {
+            "type": "render_screenshot",
+            "location": location,
+            "caption_or_near_text": label,
+            "ocr_or_extracted_text": near_text,
+            "saved_path": str(filepath),
+        }
+
+    except Exception as e:
+        print(f"[렌더링 스크린샷 실패] {label}: {e}")
+        return None
+
+
+
+MATHJAX_RENDER_ELEMENT_SELECTOR = (
+    "mjx-container, mjx-container *, "
+    "mjx-math, mjx-mrow, mjx-mi, mjx-mo, mjx-mn, mjx-msup, mjx-msub, mjx-mfrac, mjx-msqrt, mjx-mtable, "
+    "math, mrow, mi, mo, mn, msup, msub, mfrac, msqrt, mtable, "
+    ".MathJax, .MathJax_Display, .MathJax_Preview, "
+    "[class*='MathJax'], [id^='MathJax'], "
+    "script[type^='math/tex'], script[type='math/mml']"
+)
+
+QUESTION_RENDER_ELEMENT_SELECTOR = (
+    f"{MATHJAX_RENDER_ELEMENT_SELECTOR}, "
+    "table, thead, tbody, tr, td, th, svg, canvas"
+)
+
+CHOICE_RENDER_ELEMENT_SELECTOR = MATHJAX_RENDER_ELEMENT_SELECTOR
+
+EXPLANATION_RENDER_ELEMENT_SELECTOR = (
+    f"{MATHJAX_RENDER_ELEMENT_SELECTOR}, "
+    "img, table, thead, tbody, tr, td, th, svg, canvas"
+)
+
+
+def explanation_has_render_elements(page) -> bool:
+    """
+    비기봇 해설 본문 안에 MathJax/이미지/표/렌더링 요소가 있는지 확인합니다.
+    """
+    try:
+        root = get_explanation_body_locator(page)
+        return locator_has_render_elements(root, EXPLANATION_RENDER_ELEMENT_SELECTOR)
+    except Exception:
+        return False
+
+
+def get_question_text_root_locator(page):
+    """
+    문제 본문/보기/제시자료가 들어 있는 영역을 반환합니다.
+    MathJax가 span.tt1t1 밖에 렌더링되는 경우도 있어서 fallback을 둡니다.
+    """
+    selectors = [
+        "div.cp1question1 div.tg1 strong.tt1 span.tt1t1",
+        "div.cp1question1 div.tg1 strong.tt1",
+        "div.cp1question1 div.tg1",
+        "div.cp1question1",
+    ]
+
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() > 0:
+                return loc
+        except Exception:
+            pass
+
+    return page.locator("div.cp1question1").first
+
+
+def locator_has_render_elements(locator, selector: str) -> bool:
+    """
+    특정 locator 내부에 MathJax/MathML/렌더링 요소가 있는지 확인합니다.
+    """
+    try:
+        if locator.count() == 0:
+            return False
+
+        target = locator.first
+        return target.locator(selector).count() > 0
+
+    except Exception:
+        return False
+    
+
+def question_has_render_elements(page) -> bool:
+    """
+    문제/보기 영역 안에 MathJax 표, HTML table, svg, canvas 등
+    텍스트 추출만으로 행·열 경계가 깨질 수 있는 렌더링 요소가 있는지 확인합니다.
+    """
+    try:
+        root = get_question_text_root_locator(page)
+        return locator_has_render_elements(root, QUESTION_RENDER_ELEMENT_SELECTOR)
+
+    except Exception:
+        return False
+
+
+def capture_question_render_element_image(page, question_id: str) -> dict | None:
+    """
+    img 태그는 아니지만 문제/보기 영역에 MathJax 표, HTML table, svg, canvas 등이 있으면
+    문제 영역 전체를 스크린샷으로 저장합니다.
+    """
+    try:
+        if not question_has_render_elements(page):
+            return None
+
+        root = get_question_text_root_locator(page)
+
+        item = capture_locator_render_screenshot(
+            page=page,
+            locator=root,
+            question_id=question_id,
+            label="question_render_table_or_formula",
+            location="question",
+            near_text="문제/보기 표·수식·렌더링 요소 확인",
+        )
+
+        if item:
+            print("[캡처] 문제/보기 렌더링 요소 스크린샷 저장")
+
+        return item
+
+    except Exception as e:
+        print(f"[문제/보기 렌더링 요소 캡처 실패] {e}")
+        return None
+
+
+def capture_choice_render_element_images(page, question_id: str) -> list[dict]:
+    """
+    선지 안에 MathJax/MathML/수식 렌더링 요소가 있으면
+    해당 선지 영역을 스크린샷으로 저장합니다.
+    """
+    image_elements: list[dict] = []
+
+    try:
+        try:
+            ensure_bottom_sheet_expanded_from_collapsed(page, max_clicks=4)
+            page.wait_for_timeout(300)
+        except Exception as e:
+            print(f"[경고] 선지 MathJax 탐색 전 하단 시트 확장 실패: {e}")
+
+        items = page.locator("ol.lst1 li.li1")
+        count = min(items.count(), 4)
+
+        choice_indexes: list[int] = []
+
+        for idx in range(count):
+            li = items.nth(idx)
+
+            if locator_has_render_elements(li, CHOICE_RENDER_ELEMENT_SELECTOR):
+                choice_indexes.append(idx)
+
+        if not choice_indexes:
+            return image_elements
+
+        for idx in choice_indexes:
+            try:
+                li = items.nth(idx)
+                text_area = li.locator("span.t1t1").first
+                target = text_area if text_area.count() > 0 else li
+
+                item = capture_locator_render_screenshot(
+                    page=page,
+                    locator=target,
+                    question_id=question_id,
+                    label=f"choice_{idx + 1}_mathjax_render",
+                    location="choice",
+                    near_text=f"선지 {idx + 1} MathJax/수식 렌더링 확인",
+                )
+
+                if item:
+                    image_elements.append(item)
+                    print(f"[캡처] 선지 {idx + 1} MathJax/수식 렌더링 스크린샷 저장")
+
+            except Exception as e:
+                print(f"[선지 MathJax 렌더링 캡처 실패] choice_{idx + 1}: {e}")
+
+    except Exception as e:
+        print(f"[선지 MathJax 렌더링 요소 탐색 실패] {e}")
+
+    return image_elements
+
+
+def capture_formula_render_images(
+    page,
+    question_id: str,
+    body: str,
+    extra_text: str,
+    choices: list[str],
+    skip_question_render: bool = False,
+) -> list[dict]:
+    image_elements: list[dict] = []
+
+    # 문제/보기 DOM에 MathJax/table/svg/canvas가 있으면 렌더링 캡처
+    if not skip_question_render and question_has_render_elements(page):
+        item = capture_question_render_element_image(page, question_id)
+
+        if item:
+            image_elements.append(item)
+
+    # DOM 렌더링 요소는 없지만 텍스트에 LaTeX/수식 패턴이 있으면 문제/보기 영역 캡처
+    elif not skip_question_render and (
+        has_latex_or_formula_text(body)
+        or has_latex_or_formula_text(extra_text)
+    ):
+        root = get_question_text_root_locator(page)
+
+        item = capture_locator_render_screenshot(
+            page=page,
+            locator=root,
+            question_id=question_id,
+            label="question_text_formula_render",
+            location="question",
+            near_text="문제/보기 수식 렌더링 확인",
+        )
+
+        if item:
+            image_elements.append(item)
+
+    # 선지 텍스트에 수식이 있는 경우, 해당 선지만 캡처합니다.
+    choice_indexes = [
+        idx
+        for idx, choice_text in enumerate(choices)
+        if has_latex_or_formula_text(str(choice_text or ""))
+    ]
+
+    if choice_indexes:
+        try:
+            ensure_bottom_sheet_expanded_from_collapsed(page, max_clicks=4)
+            page.wait_for_timeout(300)
+        except Exception as e:
+            print(f"[경고] 선지 수식 캡처 전 하단 시트 확장 실패: {e}")
+
+        items = page.locator("ol.lst1 li.li1")
+
+        for idx in choice_indexes:
+            try:
+                li = items.nth(idx)
+
+                item = capture_locator_render_screenshot(
+                    page=page,
+                    locator=li,
+                    question_id=question_id,
+                    label=f"choice_{idx + 1}_formula_render",
+                    location="choice",
+                    near_text=f"선지 {idx + 1} 수식 렌더링 확인",
+                )
+
+                if item:
+                    image_elements.append(item)
+
+            except Exception as e:
+                print(f"[선지 수식 렌더링 캡처 실패] choice_{idx + 1}: {e}")
+                
+    # 텍스트 추출 결과에 LaTeX 원문이 남지 않는 MathJax 렌더링 선지도 캡처합니다.
+    dom_choice_render_images = capture_choice_render_element_images(page, question_id)
+
+    existing_labels = {
+        item.get("caption_or_near_text", "")
+        for item in image_elements
+    }
+
+    for item in dom_choice_render_images:
+        label = item.get("caption_or_near_text", "")
+        if label not in existing_labels:
+            image_elements.append(item)
+            existing_labels.add(label)                
+                
+
+    return image_elements
+
+
+def capture_explanation_images(page, question_id, already_ready=False):
     saved_paths = []
     meta = {
         "attempted": True,
@@ -1102,11 +1477,11 @@ def capture_explanation_images(page, question_id):
     }
 
     try:
-        wait_until_explanation_ready(page)
-        page.wait_for_timeout(500)
+        if not already_ready:
+            wait_until_explanation_ready(page)
 
         t1 = get_explanation_body_locator(page)
-        t1.wait_for(state="visible", timeout=5000)
+        t1.wait_for(state="visible", timeout=3000)
 
         viewport = page.viewport_size
         if not viewport:
@@ -1123,7 +1498,7 @@ def capture_explanation_images(page, question_id):
         clip_top_pad = 6
 
         collapsed = ensure_bottom_sheet_collapsed(page, max_clicks=5)
-        page.wait_for_timeout(700)
+        page.wait_for_timeout(300)
 
         if not collapsed or not is_bottom_sheet_low_enough(page):
             print("[경고] 해설 캡처 전 축소 상태 확인 실패 -> 해설 캡처 건너뜀")
@@ -1146,7 +1521,7 @@ def capture_explanation_images(page, question_id):
 
         scroll_adjust = first_box["y"] - top_margin
         page.mouse.wheel(0, int(scroll_adjust))
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(300)
 
         fits_now, fit_info = explanation_fits_in_view(
             page,
@@ -1172,14 +1547,14 @@ def capture_explanation_images(page, question_id):
 
                 meta["zoom_applied"] = True
 
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(300)
 
                 # 배율 변경 후 다시 축소 상태 재확인
                 recollapsed_after_zoom = ensure_bottom_sheet_collapsed(
                     page,
                     max_clicks=5
                 )
-                page.wait_for_timeout(700)
+                page.wait_for_timeout(300)
 
                 if not recollapsed_after_zoom or not is_bottom_sheet_low_enough(page):
                     print(f"[경고] {zoom} 적용 후 축소 상태 확인 실패")
@@ -1190,7 +1565,7 @@ def capture_explanation_images(page, question_id):
                 if zoomed_box:
                     scroll_adjust = zoomed_box["y"] - top_margin
                     page.mouse.wheel(0, int(scroll_adjust))
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(300)
 
                 # 다시 한 화면 적합 여부 검사
                 fits_after_zoom, fit_info = explanation_fits_in_view(
@@ -1331,7 +1706,7 @@ def close_main_popup_today(page):
             loc = page.locator(selector).first
             if loc.is_visible(timeout=1500):
                 loc.click(force=True, timeout=2000)
-                page.wait_for_timeout(700)
+                page.wait_for_timeout(300)
                 print(f"[팝업 처리] 오늘은 그만 보기 클릭 성공: {selector}")
                 return True
         except Exception:
@@ -1404,7 +1779,7 @@ def login(page, user_id, password):
     save_debug(page, "before_login_attempt")
 
     close_main_popup_today(page)
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(400)
 
     if not click_hamburger_menu(page):
         raise RuntimeError("햄버거 메뉴를 찾지 못했습니다.")
@@ -1434,11 +1809,12 @@ def login(page, user_id, password):
     if not submit_login(page):
         raise RuntimeError("로그인 제출에 실패했습니다.")
 
-    page.wait_for_timeout(5000)
-    page.goto(TARGET_MAIN_URL, wait_until="networkidle")
-    page.wait_for_timeout(3000)
+    page.goto(TARGET_MAIN_URL, wait_until="domcontentloaded", timeout=15000)
 
-    page.locator("a.a1[href*='mypt1.php'] span.t1").first.wait_for(timeout=10000)
+    page.locator("a.a1[href*='mypt1.php'] span.t1").first.wait_for(
+        state="attached",
+        timeout=10000
+    )
     ensure_main_page(page)
     save_debug(page, "after_login_main_reload")
 
@@ -1745,6 +2121,27 @@ def capture_question_and_choice_images(page, question_id, recollapse_after_choic
     except Exception as e:
         print(f"[문제 이미지 탐색 실패] {e}")
 
+    # img 태그가 아닌 MathJax 표/HTML table/svg/canvas도 문제 풀이 자료이므로
+    # 문제/보기 영역 전체를 스크린샷으로 저장합니다.
+    try:
+        render_item = capture_question_render_element_image(page, question_id)
+
+        if render_item:
+            image_elements.append(render_item)
+            question_image_capture_meta["image_count"] += 1
+
+            if question_image_capture_meta["capture_mode"] == "not_needed":
+                question_image_capture_meta["capture_mode"] = "render_screenshot"
+            elif "render_screenshot" not in question_image_capture_meta["capture_mode"]:
+                question_image_capture_meta["capture_mode"] = (
+                    f"{question_image_capture_meta['capture_mode']}+render_screenshot"
+                )
+
+    except Exception as e:
+        print(f"[문제/보기 렌더링 요소 탐색 실패] {e}")
+        question_image_capture_meta["needs_manual_review"] = True
+        question_image_capture_meta["capture_mode"] = "render_capture_failed"
+
     # 선지 이미지
     try:
         items = page.locator("ol.lst1 li.li1")
@@ -1754,7 +2151,7 @@ def capture_question_and_choice_images(page, question_id, recollapse_after_choic
 
         if has_choice_image:
             expanded = ensure_bottom_sheet_expanded_from_collapsed(page, max_clicks=4)
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(400)
 
             if not expanded:
                 print("[경고] 선지 이미지용 확장 상태를 확인하지 못해 이번 문제의 선지 이미지 캡처를 건너뜁니다.")
@@ -1824,7 +2221,7 @@ def capture_question_and_choice_images(page, question_id, recollapse_after_choic
             try:
                 print("[디버그] 해설 이미지 캡처 예정이므로 선지 캡처 후 재축소 시도")
                 recollapsed = ensure_bottom_sheet_collapsed(page, max_clicks=5)
-                page.wait_for_timeout(800)
+                page.wait_for_timeout(400)
 
                 if recollapsed and is_bottom_sheet_low_enough(page):
                     print("[성공] 해설 이미지 캡처 전 하단 시트 재축소 완료")
@@ -1968,17 +2365,38 @@ def detect_images(page, question_id, recollapse_after_choice_capture=False):
 
 def wait_for_question_ready(page, timeout=10000) -> bool:
     try:
-        page.locator("div.cp1question1 div.tg1 strong.tt1 span.tt1n").first.wait_for(
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+
+        page.locator("div.cp1question1").first.wait_for(
             state="attached",
             timeout=timeout,
         )
-        page.locator("div.cp1question1 div.tg1 strong.tt1 > span.tt1t1").first.wait_for(
-            state="attached",
-            timeout=timeout,
-        )
-        return True
+
+        selectors = [
+            "div.cp1question1 div.tg1 strong.tt1 span.tt1t1",
+            "div.cp1question1 div.tg1 strong.tt1",
+            "div.cp1question1 div.tg1",
+            "div.cp1question1",
+        ]
+
+        for selector in selectors:
+            try:
+                loc = page.locator(selector).first
+                loc.wait_for(state="attached", timeout=2000)
+
+                text = (loc.inner_text(timeout=2000) or "").strip()
+                if text:
+                    return True
+            except Exception:
+                continue
+
+        print("[경고] 문제 컨테이너는 있으나 본문 텍스트가 비어 있습니다.")
+        save_debug(page, "question_ready_empty_text")
+        return False
+
     except Exception as e:
         print(f"[경고] 문제 화면 준비 대기 실패: {e}")
+        save_debug(page, "question_ready_fail")
         return False
 
 
@@ -1995,6 +2413,13 @@ def wait_for_list_ready(page, timeout=10000) -> bool:
     
 
 def extract_question_number(page):
+    try:
+        # 문제 본문 화면이 아니면 번호를 읽지 않습니다.
+        if page.locator("div.cp1question1").count() == 0:
+            return None
+    except Exception:
+        return None
+
     try:
         el = page.locator("div.cp1question1 div.tg1 strong.tt1 span.tt1n").first
         el.wait_for(state="attached", timeout=5000)
@@ -2016,7 +2441,7 @@ def extract_question_number(page):
     except Exception:
         pass
 
-    return 1
+    return None
 
 
 def extract_body_and_extra(page):
@@ -2024,12 +2449,19 @@ def extract_body_and_extra(page):
     extra_text = ""
 
     try:
-        root = page.locator("div.cp1question1 div.tg1 strong.tt1 > span.tt1t1").first
-        root.wait_for(state="attached", timeout=5000)
+        root = get_question_text_root_locator(page)
+        root.wait_for(state="attached", timeout=7000)
 
-        result = root.evaluate("""
+        result = root.evaluate(r"""
             (el) => {
+                const normalize = (value) => (value || "")
+                    .replace(/\u00a0/g, " ")
+                    .replace(/[ \t\f\v]+/g, " ")
+                    .trim();
+
                 const read = (node) => {
+                    if (!node) return "";
+
                     if (node.nodeType === Node.TEXT_NODE) {
                         return node.textContent || "";
                     }
@@ -2038,15 +2470,55 @@ def extract_body_and_extra(page):
                         return "";
                     }
 
-                    if (node.tagName && node.tagName.toLowerCase() === "br") {
-                        return "\\n";
+                    const tag = (node.tagName || "").toLowerCase();
+
+                    if (tag === "br") {
+                        return "\n";
                     }
 
-                    let result = "";
-                    for (const child of node.childNodes) {
-                        result += read(child);
+                    // MathJax는 보이는 DOM의 textContent가 비어 있거나 붙을 수 있으므로
+                    // assistive MathML이 있으면 그 구조를 우선 사용합니다.
+                    if (tag === "mjx-container") {
+                        const math = node.querySelector("mjx-assistive-mml math");
+                        if (math) return read(math);
                     }
-                    return result;
+
+                    // 표 계열: 행은 줄바꿈, 열은 | 로 구분합니다.
+                    if (["table", "tbody", "thead", "mtable", "mjx-mtable"].includes(tag)) {
+                        return Array.from(node.children)
+                            .map(read)
+                            .map(normalize)
+                            .filter(Boolean)
+                            .join("\n") + "\n";
+                    }
+
+                    if (["tr", "mtr", "mlabeledtr", "mjx-mtr"].includes(tag)) {
+                        return Array.from(node.children)
+                            .map(read)
+                            .map(normalize)
+                            .filter(Boolean)
+                            .join(" | ") + "\n";
+                    }
+
+                    if (["td", "th", "mtd", "mjx-mtd"].includes(tag)) {
+                        return Array.from(node.childNodes)
+                            .map(read)
+                            .join("")
+                            .trim();
+                    }
+
+                    if (["p", "div", "li", "ul", "ol", "section", "article"].includes(tag)) {
+                        const inner = Array.from(node.childNodes)
+                            .map(read)
+                            .join("")
+                            .trim();
+
+                        return inner ? inner + "\n" : "";
+                    }
+
+                    return Array.from(node.childNodes)
+                        .map(read)
+                        .join("");
                 };
 
                 const directParts = [];
@@ -2071,7 +2543,7 @@ def extract_body_and_extra(page):
                         node.tagName &&
                         node.tagName.toLowerCase() === "br"
                     ) {
-                        directParts.push("\\n");
+                        directParts.push("\n");
                         continue;
                     }
 
@@ -2082,7 +2554,7 @@ def extract_body_and_extra(page):
 
                 return {
                     body: directParts.join(""),
-                    extra_text: nestedParts.join("\\n\\n")
+                    extra_text: nestedParts.join("\n\n")
                 };
             }
         """)
@@ -2090,8 +2562,8 @@ def extract_body_and_extra(page):
         body = normalize_multiline_text(result.get("body", ""))
         extra_text = normalize_multiline_text(result.get("extra_text", ""))
 
-        print(f"[디버그] body: {repr(body)}")
-        print(f"[디버그] extra_text:\n{extra_text}")
+        debug_log(f"[디버그] body: {repr(body)}")
+        debug_log(f"[디버그] extra_text:\n{extra_text}")
 
     except Exception as e:
         print(f"[body/extra_text 추출 오류] {e}")
@@ -2110,7 +2582,7 @@ def extract_explanation(page):
 
         text = locator_text_with_br(el)
 
-        print(f"[디버그] 해설(<br> 줄바꿈 유지):\n{text[:300]}")
+        debug_log(f"[디버그] 해설(<br> 줄바꿈 유지):\n{text[:300]}")
         return text
 
     except Exception as e:
@@ -2379,7 +2851,7 @@ def extract_pt_teacher_tip(page) -> dict:
         else:
             result["tip_type"] = "unknown"
 
-        print(
+        debug_log(
             "[디버그] PT쌤 합격팁 추출: "
             f"has_tip={result.get('has_tip')}, "
             f"tip_type={result.get('tip_type', '')}, "
@@ -2396,25 +2868,97 @@ def extract_pt_teacher_tip(page) -> dict:
         return make_empty_pt_teacher_tip()
 
 
+def has_latex_or_formula_text(text: str) -> bool:
+    """
+    텍스트 안에 LaTeX/수식 렌더링 확인이 필요한 표현이 있는지 판단합니다.
+
+    주의:
+    - SQL 컬럼명/식별자에서 자주 쓰는 M_SAL, EMP_NO, ORDER_ID 같은 언더스코어는
+      수식 첨자로 보지 않습니다.
+    - SQL의 일반 =, *, /, _ 만으로는 True를 반환하지 않습니다.
+    """
+    text = text or ""
+
+    if not text.strip():
+        return False
+
+    # SQL/DB 식별자에서 흔한 대문자_대문자 패턴 제거
+    # 예: M_SAL, EMP_NO, ORDER_ID, USER_ID
+    text_for_check = re.sub(
+        r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b",
+        "",
+        text,
+    )
+
+    patterns = [
+        r"\$[^$\n]+\$",                 # $...$
+        r"\$\$[\s\S]+?\$\$",            # $$...$$
+        r"\\[a-zA-Z]+",                 # \frac, \sqrt, \text, \left 등
+        r"\\\(",                        # \(
+        r"\\\)",                        # \)
+        r"\\\[",                        # \[
+        r"\\\]",                        # \]
+        r"\\begin\{",
+        r"\\end\{",
+        r"\^\{[^}]+\}",                 # x^{2}
+        r"_\{[^}]+\}",                  # x_{i}
+        r"\b[a-z]\s*_[a-z0-9]\b",       # x_i, a_n 같은 소문자 수식 첨자만 허용
+        r"\b[a-z]\s*\^\s*[0-9a-z]\b",   # x^2, a^n
+        r"[∑√≤≥±×÷∞≈≠→←↔∫∂∆πθαβγμσΩ]",
+        r"MathJax",
+        r"mjx-container",
+        r"<math",
+        r"<mjx-",
+        r"[⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉]",
+    ]
+
+    return any(re.search(pattern, text_for_check) for pattern in patterns)
+
+
 def should_capture_explanation(page, text):
+    """
+    해설에 LaTeX/수식/MathJax/표/이미지가 있으면 해설 이미지를 캡처합니다.
+    일반 SQL의 =, *, / 만으로는 캡처하지 않습니다.
+    """
+    text = text or ""
 
-    # MathJax 수식 있으면 캡처
-    try:
-        if page.locator("mjx-container, mjx-math, math").count() > 0:
-            print("[판단] MathJax 수식 존재 -> 해설 이미지 캡처")
-            return True
-    except Exception:
-        pass
-
-    # 수식 문자 패턴 있으면 캡처
-    if any(token in text for token in ["\\", "$", "*", "=", "{"]):
+    if explanation_has_render_elements(page):
+        print("[판단] 해설에 이미지/표/MathJax/수식 렌더링 요소 존재 -> 해설 이미지 캡처")
         return True
 
-    if re.search(r"\w+/\w+", text):
+    if has_latex_or_formula_text(text):
+        print("[판단] 해설에 LaTeX/수식 패턴 감지 -> 해설 이미지 캡처")
         return True
 
-    # 수식 없으면 캡처 안 함
     return False
+
+
+def dedupe_image_elements(image_elements: list[dict]) -> list[dict]:
+    """
+    같은 이미지 또는 같은 렌더링 캡처는 한 번만 남깁니다.
+    render_screenshot은 saved_path가 달라도 location + caption 기준으로 중복 제거합니다.
+    """
+    result = []
+    seen = set()
+
+    for item in image_elements:
+        img_type = item.get("type", "")
+        location = item.get("location", "")
+        caption = item.get("caption_or_near_text", "")
+        saved_path = item.get("saved_path", "")
+
+        if img_type == "render_screenshot":
+            key = (img_type, location, caption)
+        else:
+            key = (location, caption, saved_path)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        result.append(item)
+
+    return result
 
 
 def extract_choices(page, question_id, image_elements=None):
@@ -2482,7 +3026,7 @@ def extract_answer_from_dom(page):
         num_text = re.sub(r"\D+", "", num_text).strip()
 
         if num_text:
-            print(f"[성공] 정답 추출: {num_text}")
+            debug_log(f"[성공] 정답 추출: {num_text}")
             return num_text
 
     except Exception as e:
@@ -2617,13 +3161,13 @@ def click_set_card(page, set_name):
 
         for attempt in range(max_scroll_try):
             found_cards = collect_visible_set_cards(page)
-            print(f"[디버그] 세트 카드 개수(시도 {attempt + 1}): {len(found_cards)}")
+            debug_log(f"[디버그] 세트 카드 개수(시도 {attempt + 1}): {len(found_cards)}")
 
             current_titles = []
 
             for idx, card, title in found_cards:
                 current_titles.append(title)
-                print(f"[디버그] 세트 카드 제목[{idx}]: {title}")
+                debug_log(f"[디버그] 세트 카드 제목[{idx}]: {title}")
                 seen_titles.add(title)
 
                 if title != target_norm:
@@ -2631,8 +3175,8 @@ def click_set_card(page, set_name):
 
                 href = card.get_attribute("href") or ""
                 onclick = card.get_attribute("onclick") or ""
-                print(f"[디버그] 클릭 대상 href[{idx}]: {href}")
-                print(f"[디버그] 클릭 대상 onclick[{idx}]: {onclick}")
+                debug_log(f"[디버그] 클릭 대상 href[{idx}]: {href}")
+                debug_log(f"[디버그] 클릭 대상 onclick[{idx}]: {onclick}")
 
                 scroll_target_above_bottom_nav(page, card)
                 page.wait_for_timeout(300)
@@ -2668,7 +3212,7 @@ def click_set_card(page, set_name):
             prev_last_title = last_title
 
             page.mouse.wheel(0, 1200)
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(400)
 
         print(f"[실패] 세트 '{set_name}'를 찾지 못했습니다.")
         print(f"[디버그] 지금까지 본 세트들: {sorted(seen_titles)}")
@@ -2713,7 +3257,7 @@ def click_course_card(page, course_name):
                         continue
 
                     current_titles.append(title)
-                    print(f"[디버그] 강좌 카드[{i}]: {title}")
+                    debug_log(f"[디버그] 강좌 카드[{i}]: {title}")
 
                     if title != target_norm:
                         continue
@@ -2796,6 +3340,374 @@ def navigate_to_target(page, cfg):
     return subjects
 
 
+def get_question_number_fast(page):
+    """
+    wait_for 없이 현재 DOM에서 문제 번호만 빠르게 읽습니다.
+    go_next_question 내부용입니다.
+    """
+    try:
+        value = page.evaluate("""
+            () => {
+                const el = document.querySelector(
+                    "div.cp1question1 div.tg1 strong.tt1 span.tt1n"
+                );
+                if (!el) return null;
+
+                const text = el.textContent || "";
+                const match = text.match(/\\d+/);
+                return match ? Number(match[0]) : null;
+            }
+        """)
+        return value
+    except Exception:
+        return None
+    
+    
+def replace_qnum_in_url(url: str, target_no: int) -> str | None:
+    """
+    현재 문제 URL에서 qNum 값만 target_no로 교체합니다.
+    """
+    if not url:
+        return None
+
+    parsed = urlparse(url)
+    query_items = parse_qsl(parsed.query, keep_blank_values=True)
+
+    if not query_items:
+        return None
+
+    has_qnum = False
+    new_query_items = []
+
+    for key, value in query_items:
+        if key == "qNum":
+            new_query_items.append((key, str(target_no)))
+            has_qnum = True
+        else:
+            new_query_items.append((key, value))
+
+    if not has_qnum:
+        return None
+
+    new_query = urlencode(new_query_items, doseq=True)
+
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            new_query,
+            parsed.fragment,
+        )
+    )
+
+
+def to_question_view_url(url: str | None) -> str | None:
+    """
+    문제 번호 이동 화면 URL(exam1numberX.php)을
+    실제 문제 화면 URL(exam1viewX.php)로 변환합니다.
+    """
+    if not url:
+        return None
+
+    try:
+        parsed = urlparse(url)
+        new_path = re.sub(
+            r"exam1number(\d+)\.php",
+            r"exam1view\1.php",
+            parsed.path,
+        )
+
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                new_path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+
+    except Exception:
+        return url
+
+
+
+def find_qnum_base_url_from_page(page, target_no: int) -> str | None:
+    """
+    현재 페이지의 문제 이동 링크를 기준으로 qNum만 바꾼 URL을 만듭니다.
+    우선순위:
+    1) 이전/다음 문제 링크: .cp1control1 a.btn-move
+    2) 상단 현재 문제 번호 링크: .cp1body1head1 a.b2
+    3) fallback: 기존 전체 qNum 링크 검색
+    """
+    try:
+        raw_url = page.evaluate(
+            """
+            () => {
+                const preferredSelectors = [
+                    ".cp1control1 a.btn-move[href*='qNum='][href*='exam1view']",
+                    ".cp1body1head1 a.b2[href*='qNum='][href*='exam1number']",
+                    ".cp1body1head1 a.b2[href*='qNum=']"
+                ];
+
+                for (const sel of preferredSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        const href = el.getAttribute("href") || "";
+                        if (href) return href;
+                    }
+                }
+
+                const els = Array.from(document.querySelectorAll("a[href*='qNum=']"));
+
+                for (const el of els) {
+                    const href = el.getAttribute("href") || "";
+                    if (href.includes("exam1view")) return href;
+                }
+
+                for (const el of els) {
+                    const href = el.getAttribute("href") || "";
+                    if (href.includes("exam1number")) return href;
+                }
+
+                return "";
+            }
+            """
+        )
+
+        if not raw_url:
+            return None
+
+        full_url = urljoin(page.url, raw_url)
+        target_url = replace_qnum_in_url(full_url, target_no)
+        return to_question_view_url(target_url)
+
+    except Exception as e:
+        print(f"[경고] qNum base URL 탐색 실패: {e}")
+        return None
+
+def normalize_exam_unique_no(value: Any) -> str:
+    """
+    DB/프론트에서 넘어온 시험 고유번호를 문자열로 정리합니다.
+    """
+    if value in (None, "", [], {}):
+        return ""
+
+    text = str(value).strip()
+
+    try:
+        return str(int(float(text)))
+    except Exception:
+        return text
+
+
+def get_cfg_exam_unique_no(cfg: dict[str, Any]) -> str:
+    """
+    cfg 또는 cfg.questions 안에서 시험 고유번호를 찾습니다.
+    우선순위:
+    1) cfg["exam_unique_no"]
+    2) cfg["exam"]
+    3) questions 안의 exam_unique_no
+    """
+    direct = normalize_exam_unique_no(
+        cfg.get("exam_unique_no") or cfg.get("exam")
+    )
+
+    if direct:
+        return direct
+
+    questions = cfg.get("questions") or []
+
+    if isinstance(questions, list):
+        exam_values = []
+
+        for q in questions:
+            if not isinstance(q, dict):
+                continue
+
+            exam = normalize_exam_unique_no(
+                q.get("exam_unique_no") or q.get("exam")
+            )
+
+            if exam:
+                exam_values.append(exam)
+
+        unique_values = sorted(set(exam_values))
+
+        if len(unique_values) == 1:
+            return unique_values[0]
+
+    return ""
+
+
+def extract_source_identity_from_url(page) -> dict:
+    """
+    현재 문제 URL에서 exam, qNum을 추출합니다.
+    DB 반영 시 exam_unique_no + question_no 매칭용으로 사용합니다.
+    """
+    try:
+        parsed = urlparse(page.url)
+        qs = parse_qs(parsed.query)
+
+        exam = normalize_exam_unique_no(
+            (qs.get("exam") or [""])[0]
+        )
+
+        qnum = (qs.get("qNum") or [""])[0]
+        qnum_int = int(qnum) if str(qnum).isdigit() else None
+
+        return {
+            "exam_unique_no": exam,
+            "site_question_no": qnum_int,
+            "source_url": page.url,
+        }
+
+    except Exception:
+        return {
+            "exam_unique_no": "",
+            "site_question_no": None,
+            "source_url": page.url if hasattr(page, "url") else "",
+        }
+
+def go_to_question_number(page, target_no: int) -> bool:
+    """
+    현재 URL 또는 현재 화면의 qNum 링크를 기준으로
+    실제 문제 화면(exam1viewX.php)으로 바로 이동합니다.
+    """
+    target_no = int(target_no)
+
+    try:
+        current_no = extract_question_number(page)
+
+        if current_no is not None and int(current_no) == target_no:
+            print(f"[정보] 이미 지정 문제 위치입니다: {target_no}")
+            return True
+    except Exception:
+        pass
+
+    # 1순위: 현재 URL에서 qNum만 바꾸고, 반드시 exam1view URL로 보정
+    target_url = replace_qnum_in_url(page.url, target_no)
+    target_url = to_question_view_url(target_url)
+
+    # 2순위: 현재 화면 안의 qNum 링크를 찾아서 qNum만 바꾸고, 반드시 exam1view URL로 보정
+    if not target_url:
+        target_url = find_qnum_base_url_from_page(page, target_no)
+        target_url = to_question_view_url(target_url)
+
+    if not target_url:
+        print(f"[경고] qNum 이동 URL을 만들지 못했습니다: {target_no}")
+        save_debug(page, f"qnum_url_not_found_{target_no}")
+        return False
+
+    try:
+        print(f"[이동] qNum 기반 실제 문제 화면 직접 이동: {target_no} / {target_url}")
+
+        page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+
+        ready = wait_for_question_ready(page, timeout=8000)
+
+        if not ready:
+            print(
+                f"[경고] qNum 이동 후 문제 화면 DOM을 찾지 못했습니다: "
+                f"target={target_no}, url={page.url}"
+            )
+            save_debug(page, f"qnum_question_not_ready_{target_no}")
+            return False
+
+        current_no = extract_question_number(page)
+
+        if current_no is not None and int(current_no) == target_no:
+            print(f"[성공] qNum 기반 지정 문제 이동: {target_no}")
+            return True
+
+        print(
+            f"[경고] qNum 이동 후 문제 번호 불일치: "
+            f"target={target_no}, current={current_no}"
+        )
+        save_debug(page, f"qnum_mismatch_target_{target_no}_current_{current_no}")
+        return False
+
+    except Exception as e:
+        print(f"[qNum 지정 문제 이동 오류] target={target_no}, err={e}")
+        save_debug(page, f"qnum_go_to_question_fail_{target_no}")
+        return False
+    
+  
+def collect_selected_questions_direct(
+    page,
+    selected_questions,
+    cfg: dict[str, Any],
+    real_subject,
+    sub_title=None,
+    collect_options=None,
+    cancel_checker=None,
+):
+    """
+    question_numbers가 지정된 경우:
+    현재 URL 또는 현재 화면 안의 qNum 링크를 기준으로
+    실제 문제 화면(exam1viewX.php)의 qNum만 바꿔 선택 문제를 직접 수집합니다.
+
+    예:
+    현재 URL이 exam1view2.php?exam=375&qNum=1일 때
+    [6, 18]
+    → exam1view2.php?exam=375&qNum=6 이동 → 6번 수집/저장
+    → exam1view2.php?exam=375&qNum=18 이동 → 18번 수집/저장
+    """
+    
+    collect_options = collect_options or {}
+
+    for target_no in sorted(selected_questions):
+        check_cancel(cancel_checker)
+
+        moved = go_to_question_number(page, target_no)
+
+        if not moved:
+            print(f"[경고] {target_no}번 qNum 직접 이동 실패 - 이 문제는 건너뜁니다.")
+            continue
+
+        q = extract_question(
+            page,
+            cfg["course_name"],
+            cfg["set_name"],
+            real_subject,
+            capture_assets=True,
+            sub_title=sub_title,
+            collect_options=collect_options,
+        )
+        
+        expected_exam = get_cfg_exam_unique_no(cfg)
+        actual_exam = str(q.get("exam_unique_no") or "").strip()
+
+        if expected_exam and actual_exam and expected_exam != actual_exam:
+            print(
+                f"[경고] DB 시험 고유번호와 실제 수집 URL의 exam 값이 다릅니다. "
+                f"expected={expected_exam}, actual={actual_exam}, target_no={target_no}"
+            )
+            save_debug(page, f"exam_mismatch_expected_{expected_exam}_actual_{actual_exam}_q_{target_no}")
+            continue        
+
+        collected_no = q.get("question_no")
+
+        if collected_no is None or int(collected_no) != int(target_no):
+            print(
+                f"[경고] 요청한 문제와 실제 수집 문제가 다릅니다. "
+                f"target={target_no}, collected={q.get('question_no')}"
+            )
+            save_debug(page, f"selected_question_mismatch_{target_no}")
+            continue
+
+        save_raw_question_if_valid(
+            q,
+            page=page,
+            debug_name=f"empty_collected_question_{target_no}",
+        )
+
+    print("[완료] 선택 문제 직접 수집 종료")
+    
+
 def go_next_question(page, current_no):
     old_no = current_no
 
@@ -2807,17 +3719,39 @@ def go_next_question(page, current_no):
             return None
 
         btn.first.click(timeout=3000)
-        print("[클릭] 다음 문제 버튼 클릭")
+        progress_log("[클릭] 다음 문제 버튼 클릭")
 
-        for _ in range(10):
-            page.wait_for_timeout(500)
-            new_no = extract_question_number(page)
+        try:
+            page.wait_for_function(
+                """
+                (oldNo) => {
+                    const el = document.querySelector(
+                        "div.cp1question1 div.tg1 strong.tt1 span.tt1n"
+                    );
+                    if (!el) return false;
 
-            if new_no != old_no:
-                print(f"[성공] 다음 문제 이동: {old_no} -> {new_no}")
-                return True
+                    const text = el.textContent || "";
+                    const match = text.match(/\\d+/);
+                    if (!match) return false;
 
-        print("[실패] 클릭했지만 문제 번호 안 바뀜")
+                    return Number(match[0]) !== oldNo;
+                }
+                """,
+                arg=old_no,
+                timeout=5000
+            )
+
+            new_no = get_question_number_fast(page)
+
+            if new_no is None:
+                new_no = extract_question_number(page)
+
+            progress_log(f"[성공] 다음 문제 이동: {old_no} -> {new_no}")
+            return True
+
+        except PlaywrightTimeoutError:
+            print("[실패] 클릭했지만 문제 번호 안 바뀜")
+            return False
 
     except Exception as e:
         print(f"[오류] 다음 문제 클릭 실패: {e}")
@@ -2825,9 +3759,77 @@ def go_next_question(page, current_no):
 
     return False
 
+def has_collected_content(q: dict[str, Any]) -> bool:
+    data = q.get("data", {}) or {}
 
-def extract_question(page, course_name, set_name, subject_name, capture_assets=True, sub_title=None):
+    has_question_material = bool(
+        str(data.get("body") or "").strip()
+        or str(data.get("extra_text") or "").strip()
+        or (data.get("image_elements") or [])
+    )
+
+    has_review_material = bool(
+        (data.get("choices") or [])
+        or str(data.get("answer") or "").strip()
+        or str(data.get("explanation") or "").strip()
+        or (data.get("keywords") or [])
+        or bool((data.get("pt_teacher_tip") or {}).get("has_tip"))
+        or (data.get("explanation_images") or [])
+    )
+
+    return has_question_material and has_review_material
+
+
+def save_raw_question_if_valid(q: dict[str, Any], page=None, debug_name: str = "") -> bool:
+    if not has_collected_content(q):
+        print(
+            f"[경고] 수집 결과가 비어 있어 RAW 저장을 건너뜁니다. "
+            f"question_no={q.get('question_no')}, url={q.get('source_url', '')}"
+        )
+
+        if page is not None:
+            save_debug(page, debug_name or f"empty_collected_question_{q.get('question_no', 'unknown')}")
+
+        return False
+
+    save_raw_question(q)
+    return True
+
+
+def save_raw_question(q: dict[str, Any]) -> Path:
+    file_path = RAW_DIR / f"{q['question_id']}.json"
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(q, f, ensure_ascii=False, indent=2)
+
+    print(f"[RAW 저장] {file_path.name}")
+    return file_path
+
+
+def extract_question(
+    page,
+    course_name,
+    set_name,
+    subject_name,
+    capture_assets=True,
+    sub_title=None,
+    collect_options=None,
+):
+    collect_options = collect_options or {}
+
+    collect_body = collect_options.get("collect_body", True)
+    collect_choices = collect_options.get("collect_choices", True)
+    collect_answer = collect_options.get("collect_answer", True)
+    collect_section_tags = collect_options.get("collect_section_tags", True)
+    collect_explanation = collect_options.get("collect_explanation", True)
+    collect_keywords = collect_options.get("collect_keywords", True)
+    collect_pt_teacher_tip = collect_options.get("collect_pt_teacher_tip", True)
+    collect_question_images = collect_options.get("collect_question_images", True)
+    collect_explanation_images = collect_options.get("collect_explanation_images", True)
+    collect_render_images = collect_options.get("collect_render_images", True)
+    
     question_no = extract_question_number(page)
+    source_identity = extract_source_identity_from_url(page)
 
     qid = make_question_id(
         course_name,
@@ -2840,6 +3842,9 @@ def extract_question(page, course_name, set_name, subject_name, capture_assets=T
     if not capture_assets:
         return {
             "question_id": qid,
+            "exam_unique_no": source_identity.get("exam_unique_no", ""),
+            "site_question_no": source_identity.get("site_question_no"),
+            "source_url": source_identity.get("source_url", ""),
             "course_name": course_name,
             "set_name": set_name,
             "subject_name": subject_name,
@@ -2878,54 +3883,131 @@ def extract_question(page, course_name, set_name, subject_name, capture_assets=T
             }
         }
 
-    body, extra_text = extract_body_and_extra(page)
-    explanation = extract_explanation(page)
-    pt_teacher_tip = extract_pt_teacher_tip(page)
-    answer = extract_answer_from_dom(page)
-    section_tags = extract_section_tags(page)
-    keywords = extract_keywords(page, wait_ready=False)
+    body = ""
+    extra_text = ""
+    choices = []
+    answer = ""
+    explanation = ""
+    pt_teacher_tip = make_empty_pt_teacher_tip()
+    section_tags = []
+    keywords = []
 
-    should_capture_expl = should_capture_explanation(page, explanation)
-
-    image_result = detect_images(
-        page,
-        qid,
-        recollapse_after_choice_capture=should_capture_expl
-    )
-
-    image_elements = image_result.get("image_elements", [])
-    question_image_capture_meta = image_result.get("question_image_capture_meta", {})
-    
-    choices = extract_choices(page, qid, image_elements)
+    image_elements = []
+    question_image_capture_meta = make_not_attempted_question_image_capture_meta()
 
     explanation_images = []
-    explanation_capture_meta = {
-        "attempted": False,
-        "zoom_applied": False,
-        "fits_in_single_before_zoom": None,
-        "fits_in_single_after_zoom": None,
-        "needs_manual_review": False,
-        "capture_mode": "not_needed",
-        "image_count": 0,
-    }
+    explanation_capture_meta = make_not_needed_explanation_capture_meta()
+
+    if collect_body:
+        body, extra_text = extract_body_and_extra(page)
+
+    if collect_answer:
+        answer = extract_answer_from_dom(page)
+
+    if collect_section_tags:
+        section_tags = extract_section_tags(page)
+
+    # 해설 영역 로딩이 필요한 경우
+    need_help_area = (
+        collect_explanation
+        or collect_keywords
+        or collect_pt_teacher_tip
+        or collect_explanation_images
+    )
+
+    help_ready = False
+
+    if need_help_area:
+        if collect_explanation or collect_keywords or collect_explanation_images:
+            explanation = extract_explanation(page)
+            help_ready = True
+        elif collect_pt_teacher_tip:
+            # PT쌤 합격팁만 검수할 때는 해설 텍스트 저장 없이 도움말 영역 로딩만 확인
+            help_ready = wait_until_explanation_ready(page)
+
+    if collect_pt_teacher_tip:
+        pt_teacher_tip = extract_pt_teacher_tip(page)
+
+    if collect_keywords:
+        keywords = extract_keywords(page, wait_ready=not help_ready)
+
+    should_capture_expl = False
+
+    if collect_explanation_images:
+        should_capture_expl = should_capture_explanation(page, explanation)
+
+    if collect_question_images:
+        image_result = detect_images(
+            page,
+            qid,
+            recollapse_after_choice_capture=should_capture_expl
+        )
+
+        image_elements = image_result.get("image_elements", [])
+        question_image_capture_meta = image_result.get(
+            "question_image_capture_meta",
+            make_not_attempted_question_image_capture_meta()
+        )
+
+    if collect_choices:
+        choices = extract_choices(page, qid, image_elements)
+
+    if collect_render_images:
+        already_has_question_render = any(
+            item.get("type") == "render_screenshot"
+            and item.get("location") == "question"
+            for item in image_elements
+        )
+
+        render_image_elements = capture_formula_render_images(
+            page=page,
+            question_id=qid,
+            body=body,
+            extra_text=extra_text,
+            choices=choices,
+            skip_question_render=already_has_question_render,
+        )
+
+        if render_image_elements:
+            image_elements.extend(render_image_elements)
+    image_elements = dedupe_image_elements(image_elements)
+
 
     if should_capture_expl:
-        explanation_capture_result = capture_explanation_images(page, qid)
+        explanation_capture_result = capture_explanation_images(
+            page,
+            qid,
+            already_ready=True
+        )
         explanation_images = explanation_capture_result.get("images", [])
-        explanation_capture_meta = explanation_capture_result.get("meta", explanation_capture_meta)
+        explanation_capture_meta = explanation_capture_result.get(
+            "meta",
+            explanation_capture_meta
+        )
 
     has_question_image = any(
         img.get("location") == "question"
+        and img.get("type") == "screenshot"
         for img in image_elements
     )
 
     has_choice_image = any(
         img.get("location") == "choice"
+        and img.get("type") == "screenshot"
         for img in image_elements
     )
 
+    has_render_image = any(
+        img.get("type") == "render_screenshot"
+        for img in image_elements
+    )
+
+
     return {
         "question_id": qid,
+        "exam_unique_no": source_identity.get("exam_unique_no", ""),
+        "site_question_no": source_identity.get("site_question_no"),
+        "source_url": source_identity.get("source_url", ""),
         "course_name": course_name,
         "set_name": set_name,
         "subject_name": subject_name,
@@ -2942,11 +4024,12 @@ def extract_question(page, course_name, set_name, subject_name, capture_assets=T
             "explanation_capture_meta": explanation_capture_meta,
             "section_tags": section_tags,
             "keywords": keywords,
-            "has_image": len(image_elements) > 0,
+            "has_image": bool(image_elements or explanation_images),
             "has_question_image": has_question_image,
             "question_image_capture_meta": question_image_capture_meta,
             "has_choice_image": has_choice_image,
-            "image_elements": image_elements
+            "image_elements": image_elements,
+            "has_render_image": has_render_image,
         }
     }
 
@@ -3052,14 +4135,39 @@ def run_collect_configs(
                                         print(f"[경고] 실행 대상 클릭 실패: {target}")
                                         continue
 
-                                    wait_for_question_ready(page)
+                                    if not wait_for_question_ready(page, timeout=3000):
+                                        print(f"[경고] 문제 화면 준비 실패 - 실행 대상을 건너뜁니다: {target}")
+                                        save_debug(page, f"question_not_ready_after_subject_click_{cfg_idx}_{idx}_{t_idx}")
+                                        continue
+
                                     save_debug(page, f"after_start_question_{cfg_idx}_{idx}")
-                                    
+
+                                    real_subject = subject if isinstance(subject, str) and not subject.startswith("__") else None
+
+                                    # question_numbers가 있으면 선택 문제만 직접 이동해서 수집하고,
+                                    # 기존 while True + 다음 버튼 순회는 타지 않습니다.
+                                    if selected_questions is not None:
+                                        collect_selected_questions_direct(
+                                            page=page,
+                                            selected_questions=selected_questions,
+                                            cfg=cfg,
+                                            real_subject=real_subject,
+                                            sub_title=target["sub_title"] if target["has_subcards"] else None,
+                                            collect_options=get_collect_options(cfg),
+                                            cancel_checker=cancel_checker,
+                                        )
+                                        continue
+                                                                        
                                     while True:
                                         check_cancel(cancel_checker)
                                         current_question_no = -1
                                         try:
                                             current_question_no = extract_question_number(page)
+
+                                            if current_question_no is None:
+                                                print("[경고] 현재 문제 번호를 읽지 못해 수집을 중단합니다.")
+                                                save_debug(page, f"question_no_missing_cfg_{cfg_idx}_subject_{idx}_target_{t_idx}")
+                                                break
 
                                             if current_question_no > end_no:
                                                 break
@@ -3073,20 +4181,29 @@ def run_collect_configs(
                                                 cfg["set_name"],
                                                 real_subject,
                                                 capture_assets=capture_assets,
-                                                sub_title=target["sub_title"] if target["has_subcards"] else None
+                                                sub_title=target["sub_title"] if target["has_subcards"] else None,
+                                                collect_options=get_collect_options(cfg),
                                             )
                                         
-                                            if should_save_question(q["question_no"], selected_questions, start_no, end_no):
-                                                file_path = RAW_DIR / f"{q['question_id']}.json"
-                                                with open(file_path, "w", encoding="utf-8") as f:
-                                                    json.dump(q, f, ensure_ascii=False, indent=2)
-                                                print(f"[RAW 저장] {file_path.name}")
+                                            collected_no = q.get("question_no")
 
-
-                                            if q["question_no"] >= end_no:
+                                            if collected_no is None:
+                                                print("[경고] 수집 후 문제 번호가 없어 RAW 저장을 건너뜁니다.")
+                                                save_debug(page, f"collected_question_no_missing_cfg_{cfg_idx}_subject_{idx}_target_{t_idx}")
                                                 break
 
-                                            next_result = go_next_question(page, q["question_no"])
+                                            if should_save_question(collected_no, selected_questions, start_no, end_no):
+                                                save_raw_question_if_valid(
+                                                    q,
+                                                    page=page,
+                                                    debug_name=f"empty_collected_question_{collected_no}",
+                                                )
+
+
+                                            if collected_no >= end_no:
+                                                break
+
+                                            next_result = go_next_question(page, collected_no)
 
                                             if next_result is None:
                                                 print("[완료] 현재 과목/하위 카드의 마지막 문제까지 수집했습니다.")
@@ -3114,17 +4231,43 @@ def run_collect_configs(
                                 click_by_text(page, "해설보며 이어하기", exact=False)
                             except Exception:
                                 click_by_text(page, "해설보며 공부하기", exact=False)
+
                             page.wait_for_timeout(1500)
                             handle_resume_popup(page)
 
-                            wait_for_question_ready(page)
+                            if not wait_for_question_ready(page):
+                                print(f"[경고] 문제 화면 준비 실패 - 과목을 건너뜁니다: {subject}")
+                                save_debug(page, f"question_not_ready_after_start_{cfg_idx}_{idx}")
+                                continue
+
                             save_debug(page, f"after_start_question_{cfg_idx}_{idx}")
 
+                            real_subject = subject if isinstance(subject, str) and not subject.startswith("__") else None
+
+                            # question_numbers가 있으면 선택 문제만 직접 이동해서 수집하고,
+                            # 기존 while True + 다음 버튼 순회는 타지 않습니다.
+                            if selected_questions is not None:
+                                collect_selected_questions_direct(
+                                    page=page,
+                                    selected_questions=selected_questions,
+                                    cfg=cfg,
+                                    real_subject=real_subject,
+                                    sub_title=None,
+                                    collect_options=get_collect_options(cfg),
+                                    cancel_checker=cancel_checker,
+                                )
+                                continue
+                                                                                            
                             while True:
                                 check_cancel(cancel_checker)
                                 current_question_no = -1
                                 try:
                                     current_question_no = extract_question_number(page)
+
+                                    if current_question_no is None:
+                                        print("[경고] 현재 문제 번호를 읽지 못해 수집을 중단합니다.")
+                                        save_debug(page, f"question_no_missing_cfg_{cfg_idx}_subject_{idx}")
+                                        break
 
                                     if current_question_no > end_no:
                                         break
@@ -3138,19 +4281,28 @@ def run_collect_configs(
                                         cfg["set_name"],
                                         real_subject,
                                         capture_assets=capture_assets,
-                                        sub_title=None
+                                        sub_title=None,
+                                        collect_options=get_collect_options(cfg),
                                     )
 
-                                    if should_save_question(q["question_no"], selected_questions, start_no, end_no):
-                                        file_path = RAW_DIR / f"{q['question_id']}.json"
-                                        with open(file_path, "w", encoding="utf-8") as f:
-                                            json.dump(q, f, ensure_ascii=False, indent=2)
-                                        print(f"[RAW 저장] {file_path.name}")
-                                        
-                                    if q["question_no"] >= end_no:
+                                    collected_no = q.get("question_no")
+
+                                    if collected_no is None:
+                                        print("[경고] 수집 후 문제 번호가 없어 RAW 저장을 건너뜁니다.")
+                                        save_debug(page, f"collected_question_no_missing_cfg_{cfg_idx}_subject_{idx}")
                                         break
 
-                                    next_result = go_next_question(page, q["question_no"])
+                                    if should_save_question(collected_no, selected_questions, start_no, end_no):
+                                        save_raw_question_if_valid(
+                                            q,
+                                            page=page,
+                                            debug_name=f"empty_collected_question_{collected_no}",
+                                        )
+                                        
+                                    if collected_no >= end_no:
+                                        break
+
+                                    next_result = go_next_question(page, collected_no)
 
                                     if next_result is None:
                                         print("[완료] 현재 과목의 마지막 문제까지 수집했습니다.")

@@ -77,11 +77,15 @@ TARGET_MAP_ID_SQL = "id INTEGER PRIMARY KEY AUTOINCREMENT" if IS_SQLITE else "id
 CREATE_QUESTIONS_SQL = f"""
 CREATE TABLE IF NOT EXISTS questions (
     {QUESTION_ID_SQL},
+    question_id TEXT,
+    collect_key TEXT,
     course_name TEXT,
     upload_file TEXT,
     exam_unique_no TEXT,
     cd_value TEXT,
+    set_name TEXT,
     subject_name TEXT,
+    subtype_name TEXT,
     chapter TEXT,
     section TEXT,
     learning_goal TEXT,
@@ -170,9 +174,13 @@ def init_db() -> None:
         conn.execute(text(CREATE_TARGET_MAPS_SQL))
         conn.execute(text(CREATE_QUESTION_CD_META_MAPS_SQL))
 
+        ensure_column(conn, "questions", "question_id", "question_id TEXT")
+        ensure_column(conn, "questions", "collect_key", "collect_key TEXT")
         ensure_column(conn, "questions", "course_name", "course_name TEXT")
         ensure_column(conn, "questions", "upload_file", "upload_file TEXT")
+        ensure_column(conn, "questions", "set_name", "set_name TEXT")
         ensure_column(conn, "questions", "subject_name", "subject_name TEXT")
+        ensure_column(conn, "questions", "subtype_name", "subtype_name TEXT")
         ensure_column(conn, "questions", "chapter", "chapter TEXT")
         ensure_column(conn, "questions", "section", "section TEXT")
         ensure_column(conn, "questions", "learning_goal", "learning_goal TEXT")
@@ -298,13 +306,17 @@ def normalize_question_row(row, default_course_name: str = "", default_upload_fi
     excel_idx = get_cell(row, ["idx", "IDX", "id", "ID"], "")
     return {
         "id": to_int_or_none(excel_idx),
+        "question_id": get_cell(row, ["question_id", "문제ID", "문제 ID"], ""),
+        "collect_key": get_cell(row, ["collect_key", "수집키", "수집 key"], ""),
         "course_name": get_cell(row, ["강좌명", "course_name", "course"], default_course_name),
         "upload_file": get_cell(row, ["업로드파일", "업로드 파일", "파일명", "upload_file", "file_name", "filename"], default_upload_file),
         "exam_unique_no": get_cell(row, ["시험 고유 번호", "시험고유번호", "exam_unique_no", "exam_no"], ""),
         "cd_value": get_cd_cell(row, ["CD값", "goal_cd", "cd_value", "cd", "code"], ""),
+        "set_name": get_cell(row, ["세트명", "set_name", "set"], ""),
         # 과목/장/절/학습목표는 문제 엑셀의 임의 컬럼값을 쓰지 않고,
         # CD 매핑 엑셀의 goal_cd 기준으로만 채웁니다.
         "subject_name": "",
+        "subtype_name": get_cell(row, ["하위유형", "subtype_name", "sub_title", "하위유형명"], ""),
         "chapter": "",
         "section": "",
         "learning_goal": "",
@@ -449,11 +461,15 @@ def resolve_target_map_by_names(
 def upsert_question(conn, data: dict[str, Any]) -> None:
     columns = [
         "id",
+        "question_id",
+        "collect_key",
         "course_name",
         "upload_file",
         "exam_unique_no",
         "cd_value",
+        "set_name",
         "subject_name",
+        "subtype_name",
         "chapter",
         "section",
         "learning_goal",
@@ -655,19 +671,37 @@ def health():
 @app.get("/api/questions")
 def get_questions():
     init_db()
+
+    question_order_sql = QUESTION_NO_ORDER_SQL.replace("question_no", "q.question_no")
+
     with engine.begin() as conn:
         rows = conn.execute(
             text(
                 f"""
-                SELECT * FROM questions
+                SELECT
+                    q.*,
+                    tm.course_name AS target_course_name,
+                    tm.set_name AS target_set_name,
+                    tm.subject_name AS target_subject_name,
+                    tm.subtype_name AS target_subtype_name
+                FROM questions q
+                LEFT JOIN review_target_maps tm
+                  ON tm.id = (
+                    SELECT tm2.id
+                    FROM review_target_maps tm2
+                    WHERE TRIM(COALESCE(tm2.exam_unique_no, '')) = TRIM(COALESCE(q.exam_unique_no, ''))
+                    ORDER BY tm2.id DESC
+                    LIMIT 1
+                  )
                 ORDER BY
-                exam_unique_no ASC,
-                {QUESTION_NO_ORDER_SQL},
-                question_no ASC,
-                id ASC
+                    q.exam_unique_no ASC,
+                    {question_order_sql},
+                    q.question_no ASC,
+                    q.id ASC
                 """
             )
         ).mappings().all()
+
     return {"items": [dict(row) for row in rows]}
 
 
@@ -784,15 +818,57 @@ async def upload_cd_meta_excel(file: UploadFile = File(...)):
     }
 
 
+
+
+def normalize_question_id_list(payload: dict) -> list[int]:
+    """
+    프론트에서 선택 삭제할 문제 id 목록을 안전하게 정수 리스트로 정리합니다.
+    지원 입력 key: ids, question_ids, questionIds
+    """
+    raw_ids = (
+        payload.get("ids")
+        or payload.get("question_ids")
+        or payload.get("questionIds")
+        or []
+    )
+
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=400, detail="ids는 배열 형식이어야 합니다.")
+
+    result: list[int] = []
+    seen: set[int] = set()
+
+    for raw_id in raw_ids:
+        try:
+            question_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+
+        if question_id <= 0 or question_id in seen:
+            continue
+
+        seen.add(question_id)
+        result.append(question_id)
+
+    if not result:
+        raise HTTPException(status_code=400, detail="삭제할 문제 id가 없습니다.")
+
+    return result
+
+
 @app.put("/api/questions/{question_id}")
 def update_question(question_id: int, payload: dict):
     init_db()
     allowed = {
+        "question_id",
+        "collect_key",
         "course_name",
         "upload_file",
         "exam_unique_no",
         "cd_value",
+        "set_name",
         "subject_name",
+        "subtype_name",
         "chapter",
         "section",
         "learning_goal",
@@ -836,6 +912,51 @@ def update_question(question_id: int, payload: dict):
         conn.execute(text(f"UPDATE questions SET {set_clause} WHERE id = :id"), update_data)
 
     return {"ok": True, "id": question_id}
+
+
+
+@app.delete("/api/questions/{question_id}")
+def delete_question(question_id: int):
+    """문제 1개를 DB에서 삭제합니다."""
+    init_db()
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("DELETE FROM questions WHERE id = :id"),
+            {"id": question_id},
+        )
+
+    deleted_count = result.rowcount or 0
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail="삭제할 문제를 찾지 못했습니다.")
+
+    return {"ok": True, "deleted_count": deleted_count, "id": question_id}
+
+
+@app.post("/api/questions/bulk-delete")
+def bulk_delete_questions(payload: dict):
+    """
+    프론트에서 체크한 여러 문제를 DB에서 삭제합니다.
+    DELETE /api/questions는 전체 삭제용으로 이미 사용 중이므로,
+    선택 삭제는 POST /api/questions/bulk-delete를 사용합니다.
+    """
+    init_db()
+    ids = normalize_question_id_list(payload)
+
+    params = {f"id_{idx}": question_id for idx, question_id in enumerate(ids)}
+    placeholders = ", ".join(f":id_{idx}" for idx in range(len(ids)))
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(f"DELETE FROM questions WHERE id IN ({placeholders})"),
+            params,
+        )
+
+    return {
+        "ok": True,
+        "requested_count": len(ids),
+        "deleted_count": result.rowcount or 0,
+        "ids": ids,
+    }
 
 
 @app.delete("/api/questions")

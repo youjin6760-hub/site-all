@@ -130,7 +130,7 @@ CHECK_PRESETS: Dict[str, Dict[str, Dict[str, bool]]] = {
 
 
 # 화면에 보이는 검수 항목 기준으로 결과 JSON을 강제합니다.
-# 내부 프롬프트 키는 더 세분화되어 있어도 출력은 아래 8개 항목 단위로 묶습니다.
+# 내부 프롬프트 키는 더 세분화되어 있어도 출력은 아래 10개 항목 단위로 묶습니다.
 VISIBLE_CHECK_GROUPS: Dict[str, Dict[str, Any]] = {
     "problem_data_validation": {
         "group": "content",
@@ -217,24 +217,23 @@ def _copy_checks(checks: Dict[str, Dict[str, bool]]) -> Dict[str, Dict[str, bool
 
 def merge_review_checks(user_checks: Dict[str, Any] | None = None) -> Dict[str, Dict[str, bool]]:
     """
-    프론트에서 전달한 checks를 기본값과 병합합니다.
-
-    지원 입력:
-    1) {"content": {...}, "format": {...}, "pt_teacher_tip": {...}}
-    2) {"preset": "format_only"}
-    3) None -> 전체 검수
+    - user_checks가 None이면 전체 검수
+    - preset이 있으면 preset 기준
+    - 직접 체크 객체가 오면 기본값은 전부 False에서 시작
     """
     if not user_checks:
         return _copy_checks(DEFAULT_REVIEW_CHECKS)
 
     preset = str(user_checks.get("preset") or user_checks.get("review_preset") or "").strip()
+
     if preset and preset in CHECK_PRESETS:
         base = _copy_checks(CHECK_PRESETS[preset])
     else:
-        base = _copy_checks(DEFAULT_REVIEW_CHECKS)
+        base = _copy_checks(CHECK_PRESETS["none"])
 
     for group in ("content", "format", "pt_teacher_tip"):
         group_value = user_checks.get(group)
+
         if not isinstance(group_value, dict):
             continue
 

@@ -2439,3 +2439,99 @@ a {
 .review-check-grid > .review-check-group:nth-child(3) {
   margin-left: 0;
 }
+/* =========================
+   2026-05-19 수정: 검수 필터/모달 레이아웃 보정
+========================= */
+:root {
+  --review-action-button-width: 150px;
+}
+
+/* 검수 상태 + 저장 버튼 4개를 데스크톱에서 한 줄로 유지 */
+.review-content-top {
+  grid-template-columns: var(--review-status-width) minmax(0, 1fr);
+  align-items: end;
+}
+
+.review-content-top .top-actions {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(132px, var(--review-action-button-width)));
+  gap: 10px;
+  justify-content: start;
+  align-items: end;
+}
+
+.review-content-top .top-actions button {
+  width: 100%;
+  min-width: 0;
+  padding: 0 10px;
+}
+
+/* Reason / Suggestion textarea를 오른쪽이 아니라 아래로 늘릴 수 있게 고정 flex 해제 */
+.review-content-grid {
+  align-items: start;
+}
+
+.review-text-column {
+  overflow: visible;
+}
+
+.reason-block,
+.suggestion-block {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.reason-block textarea,
+.suggestion-block textarea {
+  flex: 0 0 auto !important;
+  width: 100%;
+  min-width: 100%;
+  max-width: 100%;
+  min-height: 180px !important;
+  height: 210px;
+  resize: vertical !important;
+  overflow: auto;
+  line-height: 1.5;
+}
+
+@media (max-width: 1200px) {
+  .review-content-top {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .review-content-top .top-actions {
+    grid-template-columns: repeat(4, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .review-content-top .top-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .reason-block textarea,
+  .suggestion-block textarea {
+    height: 150px;
+    min-height: 150px !important;
+  }
+}
+
+
+/* =========================
+   2026-05-20 수정: 검수 모달 다음 문제 버튼
+========================= */
+.save-blue {
+  background: #2563eb;
+}
+
+.save-blue:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.side-actions button:disabled,
+.top-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
