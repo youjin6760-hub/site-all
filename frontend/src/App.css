@@ -257,6 +257,24 @@ a {
   background: #d97706;
 }
 
+.btn-unchecked {
+  background: #7c3aed;
+  color: #ffffff;
+}
+
+.btn-unchecked:hover {
+  background: #6d28d9;
+}
+
+.btn-unchecked-error {
+  background: #16a34a;
+  color: #ffffff;
+}
+
+.btn-unchecked-error:hover {
+  background: #15803d;
+}
+
 .btn-danger {
   background: #e11d48;
   color: #ffffff;
@@ -2534,4 +2552,125 @@ a {
 .top-actions button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+
+/* =========================
+   검수 내용: 누적 이력 선택 + 오류영역 2열 배치
+========================= */
+
+.review-history-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-history-current-btn {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.review-history-current-btn.active {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+}
+
+.review-history-item {
+  cursor: pointer;
+}
+
+.review-history-item.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.review-history-item.active strong {
+  color: #1d4ed8;
+}
+
+/* 전체 검수 내용 영역: 왼쪽 오류영역 + 오른쪽 사유/제안 */
+.review-content-grid {
+  grid-template-columns: minmax(430px, 1.05fr) minmax(360px, 0.95fr);
+  column-gap: 12px;
+  align-items: start;
+}
+
+/* 왼쪽 오류영역 내부를 내용 오류 / 형식 오류 2열로 변경 */
+.review-error-column {
+  display: grid;
+  grid-template-columns: minmax(210px, 1fr) minmax(190px, 0.9fr);
+  gap: 12px;
+  align-items: start;
+}
+
+/* 기존 flex 비율 제거 */
+.content-error-block,
+.format-error-block {
+  flex: none;
+  min-width: 0;
+}
+
+/* 오류 박스 높이와 여백 축소 */
+.error-block .error-type-box {
+  padding: 9px;
+}
+
+.error-block .error-check-list {
+  height: auto;
+  gap: 8px;
+  justify-content: flex-start !important;
+}
+
+.error-block .error-check-item {
+  min-height: 38px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+
+.error-block .error-check-item input {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+}
+
+.error-block .error-check-item span {
+  min-width: 0;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+/* 선택한 누적 이력 보기 상태에서는 읽기 전용처럼 보이게 */
+.reason-block textarea[readonly],
+.suggestion-block textarea[readonly] {
+  background: #f8fafc;
+  color: #374151;
+}
+
+/* 화면이 좁을 때는 다시 세로 배치 */
+@media (max-width: 1200px) {
+  .review-content-grid {
+    grid-template-columns: 1fr;
+    row-gap: 12px;
+  }
+
+  .review-error-column {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .review-error-column {
+    grid-template-columns: 1fr;
+  }
 }

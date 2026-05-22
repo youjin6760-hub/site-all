@@ -88,6 +88,13 @@ const DEFAULT_REVIEW_CHECKS = {
     long_explanation_manual_check: true,
   },
   pt_teacher_tip: {
+    pt_teacher_tip_validation: false,
+  },
+};
+
+const REVIEW_CHECKS_WITH_PT_TIP = {
+  ...DEFAULT_REVIEW_CHECKS,
+  pt_teacher_tip: {
     pt_teacher_tip_validation: true,
   },
 };
@@ -120,9 +127,13 @@ const EMPTY_REVIEW_CHECKS = {
 };
 
 const REVIEW_CHECK_PRESETS = {
-  all: {
-    label: "전체 검수",
+  contentFormat: {
+    label: "내용+형식",
     checks: DEFAULT_REVIEW_CHECKS,
+  },
+  all: {
+    label: "합격팁 포함 전체",
+    checks: REVIEW_CHECKS_WITH_PT_TIP,
   },
   contentOnly: {
     label: "내용만",
@@ -510,36 +521,75 @@ function makeReviewScopeSummary(labels) {
   const normalized = uniqueLabels(labels);
   if (normalized.length === 0) return "-";
 
-  const { content, format, ptTeacherTip, all } = getAllReviewLabelGroups();
-  const hasAllContent = content.every((label) => normalized.includes(label));
-  const hasAllFormat = format.every((label) => normalized.includes(label));
-  const hasAllPtTeacherTip = ptTeacherTip.every((label) => normalized.includes(label));
-  const hasAll = all.every((label) => normalized.includes(label));
+  const { content, format, ptTeacherTip } = getAllReviewLabelGroups();
 
-  if (hasAll) return "전체 검수";
+  const selectedContent = content.filter((label) => normalized.includes(label));
+  const selectedFormat = format.filter((label) => normalized.includes(label));
+  const selectedPtTeacherTip = ptTeacherTip.filter((label) => normalized.includes(label));
 
-  const remainingContent = content.filter((label) => normalized.includes(label));
-  const remainingFormat = format.filter((label) => normalized.includes(label));
-  const remainingPtTeacherTip = ptTeacherTip.filter((label) => normalized.includes(label));
+  const hasAnyContent = selectedContent.length > 0;
+  const hasAnyFormat = selectedFormat.length > 0;
+  const hasAnyPtTeacherTip = selectedPtTeacherTip.length > 0;
 
-  if (hasAllContent && remainingFormat.length === 0 && remainingPtTeacherTip.length === 0) return "내용 검수";
-  if (hasAllFormat && remainingContent.length === 0 && remainingPtTeacherTip.length === 0) return "형식 검수";
-  if (hasAllPtTeacherTip && remainingContent.length === 0 && remainingFormat.length === 0) return "PT쌤 합격팁 검수";
+  const hasAllContent = content.length > 0 && content.every((label) => normalized.includes(label));
+  const hasAllFormat = format.length > 0 && format.every((label) => normalized.includes(label));
+  const hasAllPtTeacherTip =
+    ptTeacherTip.length > 0 && ptTeacherTip.every((label) => normalized.includes(label));
+
+  if (hasAllContent && hasAllFormat && hasAllPtTeacherTip) {
+    return "전체 검수";
+  }
+
+  if (hasAllContent && hasAllFormat && !hasAnyPtTeacherTip) {
+    return "내용+형식 검수";
+  }
+
+  const parts = [];
 
   if (hasAllContent) {
-    return ["내용 검수", ...remainingFormat].join(", ");
+    parts.push("내용 검수");
+  } else if (hasAnyContent) {
+    parts.push(...selectedContent);
   }
 
   if (hasAllFormat) {
-    return [...remainingContent, "형식 검수"].join(", ");
+    parts.push("형식 검수");
+  } else if (hasAnyFormat) {
+    parts.push(...selectedFormat);
   }
 
-  return normalized.join(", ");
+  if (hasAllPtTeacherTip) {
+    parts.push("PT쌤 합격팁 검수");
+  } else if (hasAnyPtTeacherTip) {
+    parts.push(...selectedPtTeacherTip);
+  }
+
+  return parts.join(", ") || "-";
 }
+
 
 function makeReviewRunTitle(labels) {
   return makeReviewScopeSummary(labels);
 }
+
+function isHistoryCoveredByCurrentRun(historyItem, runLabels, runSummary) {
+  const itemLabels = uniqueLabels(historyItem.labels || []);
+  const itemSummary = historyItem.summary || makeReviewScopeSummary(itemLabels);
+
+  // 같은 검수 범위는 새 결과로 교체
+  if (itemSummary === runSummary) return true;
+
+  // 전체 검수는 이전 내용/형식/합격팁 검수 결과를 모두 대체
+  if (runSummary === "전체 검수") return true;
+
+  // 현재 검수가 이전 이력의 검수 항목을 전부 포함하면 이전 이력을 대체
+  if (itemLabels.length > 0 && itemLabels.every((label) => runLabels.includes(label))) {
+    return true;
+  }
+
+  return false;
+}
+
 
 function mergeTextBlock(existingText, title, body) {
   const current = String(existingText || "").trim();
@@ -552,7 +602,8 @@ function mergeTextBlock(existingText, title, body) {
 
 function formatIssuesForHistory(issues) {
   return (issues || []).map((issue) => ({
-    issue_type: issue.issue_type || "",
+    issue_area: issue.issue_area || issue.issueArea || "",
+    issue_type: issue.issue_type || issue.type || "",
     reason: issue.reason || "",
     suggestion: issue.suggestion || "",
   }));
@@ -562,7 +613,8 @@ function normalizeReviewHistory(history) {
   return parseJsonArray(history).map((item, index) => {
     const labels = uniqueLabels(item.labels || []);
     const issues = formatIssuesForHistory(item.issues || []);
-    const summary = item.summary || makeReviewScopeSummary(labels);
+    const computedSummary = makeReviewScopeSummary(labels);
+    const summary = computedSummary !== "-" ? computedSummary : (item.summary || "-");
 
     return {
       ...item,
@@ -628,6 +680,45 @@ function rebuildReviewFieldsFromHistory(history) {
     review_status: nextStatus,
   };
 }
+
+function buildReviewViewFromHistoryEntry(entry) {
+  const normalized = normalizeReviewHistory([entry])[0];
+
+  if (!normalized) {
+    return {
+      error_types: [],
+      reason: "",
+      suggestion: "",
+      status: "정상",
+    };
+  }
+
+  const issues = normalized.issues || [];
+
+  const errorTypes = normalizeErrorTypes(
+    issues
+      .map((issue) => issue.issue_type || issue.type)
+      .filter(Boolean)
+  );
+
+  const reason = issues
+    .map((issue) => issue.reason || "")
+    .filter(Boolean)
+    .join("\n\n");
+
+  const suggestion = issues
+    .map((issue) => issue.suggestion || "")
+    .filter(Boolean)
+    .join("\n\n");
+
+  return {
+    error_types: errorTypes,
+    reason,
+    suggestion,
+    status: issues.length > 0 ? "오류있음" : "정상",
+  };
+}
+
 
 function toggleReviewGroup(setReviewChecks, group, groupKey) {
   const checkItems = getReviewGroupCheckItems(group, groupKey);
@@ -956,6 +1047,17 @@ function mapQuestion(item, index) {
     ""
   );
 
+  const reviewCheckLabels = parseLabelList(
+    pick(merged, ["review_check_labels", "reviewCheckLabels", "검수항목"], "")
+  );
+
+  const storedReviewScopeSummary = toText(
+    pick(merged, ["review_scope_summary", "reviewScopeSummary", "검수범위"], ""),
+    ""
+  );
+
+  const computedReviewScopeSummary = makeReviewScopeSummary(reviewCheckLabels);
+
   return {
     rowKey: `question-${id}`,
     id: toText(id),
@@ -981,10 +1083,10 @@ function mapQuestion(item, index) {
     reviewer: toText(pick(merged, ["reviewer", "inspector", "검수자"]), "admin"),
     reviewedAt: toText(pick(merged, ["reviewed_at", "review_date", "checked_at", "검수일"]), "-"),
     reflectStatus: toText(pick(merged, ["reflect_status", "reflection_status", "apply_status", "반영상태"]), "미반영"),
-    reviewCheckLabels: parseLabelList(pick(merged, ["review_check_labels", "reviewCheckLabels", "검수항목"], "")),
-    reviewScopeSummary: toText(pick(merged, ["review_scope_summary", "reviewScopeSummary", "검수범위"], ""), ""),
-    reviewCheckHistory: parseJsonArray(pick(merged, ["review_check_history", "reviewCheckHistory"], "")),
-    raw: merged,
+    reviewCheckLabels,
+    reviewScopeSummary:
+      computedReviewScopeSummary !== "-" ? computedReviewScopeSummary : storedReviewScopeSummary,
+    reviewCheckHistory: parseJsonArray(pick(merged, ["review_check_history", "reviewCheckHistory"], "")),    raw: merged,
     targetCourseName: toText(targetCourseName, ""),
     targetSetName: toText(targetSetName, ""),
     targetSubjectName: toText(targetSubjectName, ""),
@@ -998,6 +1100,7 @@ function App() {
   const [targetMaps, setTargetMaps] = useState([]);
   const [reviewQuestion, setReviewQuestion] = useState(null);
   const [editForm, setEditForm] = useState(null);
+  const [selectedReviewHistoryIndex, setSelectedReviewHistoryIndex] = useState(null);
   const questionFileInputRef = useRef(null);
   const cdMetaFileInputRef = useRef(null);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -1012,7 +1115,7 @@ function App() {
   const [cancelingReview, setCancelingReview] = useState(false);
   const [reviewJobInfo, setReviewJobInfo] = useState(null);
   const [reviewChecks, setReviewChecks] = useState(() => cloneReviewChecks(DEFAULT_REVIEW_CHECKS));
-  const [activeReviewPreset, setActiveReviewPreset] = useState("all");
+  const [activeReviewPreset, setActiveReviewPreset] = useState("contentFormat");
   const [selectedRows, setSelectedRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -2141,6 +2244,12 @@ const targetSubtypeOptions = useMemo(() => {
   };
 
   const filterRowsByReviewStatus = (targetRows, statusFilter) => {
+    if (statusFilter === "uncheckedOnly") {
+      return targetRows.filter((row) =>
+        (row.reviewStatus || "").includes("미검수")
+      );
+    }
+
     if (statusFilter === "uncheckedOrError") {
       return targetRows.filter((row) =>
         (row.reviewStatus || "").includes("미검수") ||
@@ -2170,57 +2279,19 @@ const targetSubtypeOptions = useMemo(() => {
     const runSummary = reviewMeta.summary || makeReviewRunTitle(runLabels);
     const runAt = new Date().toISOString();
 
+    const updates = [];
+
     for (const item of items) {
       const siteQuestionId = item.site_question_id;
       if (!siteQuestionId) continue;
 
       const currentRow = currentRowsById.get(String(siteQuestionId));
       const currentRaw = currentRow?.raw || {};
-      const previousErrorTypes = splitErrorTypes(
-        currentRow?.errorType && currentRow.errorType !== "-"
-          ? currentRow.errorType
-          : getValue(currentRaw, ["error_type", "issue_type", "errorType", "오류유형"], "")
-      );
 
-      const previousReason = currentRow?.reason && currentRow.reason !== "-"
-        ? currentRow.reason
-        : getValue(currentRaw, ["reason", "기타사유", "오류사유"], "");
-
-      const previousSuggestion = currentRow?.suggestion || getValue(currentRaw, ["suggestion", "수정제안", "수정 제안"], "");
-      const previousLabels = uniqueLabels(currentRow?.reviewCheckLabels || parseLabelList(currentRaw.review_check_labels));
       const previousHistory = parseJsonArray(currentRaw.review_check_history);
 
       const issues = item.issues || [];
       const hasIssue = item.review_status === "issue_found" || issues.length > 0;
-      const newErrorTypes = hasIssue
-        ? normalizeErrorTypes(issues.map((issue) => issue.issue_type)).filter(Boolean)
-        : [];
-
-      const errorTypeList = normalizeErrorTypes([...previousErrorTypes, ...newErrorTypes]);
-      const reviewCheckLabels = uniqueLabels([...previousLabels, ...runLabels]);
-      const reviewScopeSummary = makeReviewScopeSummary(reviewCheckLabels);
-
-      const issueReason = hasIssue
-        ? issues
-            .map((issue) => issue.reason || "")
-            .filter(Boolean)
-            .join("\n\n")
-        : "";
-
-      const issueSuggestion = hasIssue
-        ? issues
-            .map((issue) => issue.suggestion || "")
-            .filter(Boolean)
-            .join("\n\n")
-        : "";
-
-      const nextReason = hasIssue
-        ? mergeTextBlock(previousReason, runSummary, issueReason)
-        : previousReason;
-
-      const nextSuggestion = hasIssue
-        ? mergeTextBlock(previousSuggestion, runSummary, issueSuggestion)
-        : previousSuggestion;
 
       const historyEntry = {
         at: runAt,
@@ -2228,28 +2299,45 @@ const targetSubtypeOptions = useMemo(() => {
         labels: runLabels,
         result: hasIssue ? "오류있음" : "정상",
         issue_count: issues.length,
-        issues: formatIssuesForHistory(issues, runAt, runSummary),
+        issues: formatIssuesForHistory(issues),
       };
 
-      const reviewCheckHistory = [...previousHistory, historyEntry].slice(-50);
-      const hasAnyIssue = errorTypeList.length > 0 || String(nextReason || "").trim() !== "";
+      const reviewCheckHistory = [
+        ...previousHistory.filter(
+          (historyItem) => !isHistoryCoveredByCurrentRun(historyItem, runLabels, runSummary)
+        ),
+        historyEntry,
+      ].slice(-20);
 
-      const res = await fetch(`${API_BASE}/api/questions/${siteQuestionId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          review_status: hasAnyIssue ? "오류있음" : "정상",
-          error_type: errorTypeList.join(", "),
-          reason: nextReason,
-          suggestion: nextSuggestion,
-          review_check_labels: reviewCheckLabels.join(", "),
-          review_scope_summary: reviewScopeSummary,
-          review_check_history: JSON.stringify(reviewCheckHistory),
-          reviewer: "AI검수",
-          reflect_status: "미반영",
-        }),
+      const rebuiltReview = rebuildReviewFieldsFromHistory(reviewCheckHistory);
+
+      updates.push({
+        id: siteQuestionId,
+        review_status: rebuiltReview.status,
+        error_type: rebuiltReview.error_type,
+        reason: rebuiltReview.reason,
+        suggestion: rebuiltReview.suggestion,
+        review_check_labels: rebuiltReview.review_check_labels.join(", "),
+        review_scope_summary: rebuiltReview.review_scope_summary,
+        review_check_history: JSON.stringify(rebuiltReview.review_check_history),
+        reviewer: "AI검수",
+        reflect_status: "미반영",
       });
-      if (!res.ok) throw new Error(`IDX ${siteQuestionId} 결과 저장 실패`);
+    }
+
+    if (updates.length === 0) {
+      return;
+    }
+
+    const res = await fetch(`${API_BASE}/api/questions/bulk-review-results`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: updates }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`AI 검수 결과 일괄 저장 실패: ${res.status} ${text}`);
     }
   };
 
@@ -2581,6 +2669,7 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
       getValue(raw, ["keywords", "keyword", "키워드"], "") ||
       getValue(raw?.data, ["keywords", "keyword"], "");
 
+    setSelectedReviewHistoryIndex(null);
     setReviewQuestion(row);
     setEditForm({
       ...raw,
@@ -2617,6 +2706,7 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
   const closeReviewModal = () => {
     setReviewQuestion(null);
     setEditForm(null);
+    setSelectedReviewHistoryIndex(null);
   };
 
   const handleEditChange = (e) => {
@@ -2632,6 +2722,8 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
   };
 
   const deleteReviewHistoryEntry = (targetIndex) => {
+    setSelectedReviewHistoryIndex(null);
+
     setEditForm((prev) => {
       const currentHistory = normalizeReviewHistory(prev.review_check_history);
       const nextHistory = currentHistory.filter((_, index) => index !== targetIndex);
@@ -2644,6 +2736,14 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
     });
   };
 
+
+  const showReviewHistoryEntry = (targetIndex) => {
+    setSelectedReviewHistoryIndex(targetIndex);
+  };
+
+  const showCurrentReviewResult = () => {
+    setSelectedReviewHistoryIndex(null);
+  };
 
   const getCurrentReviewNavigationRows = () => {
     // 검수 화면에서는 검수 대상 문제 내역 기준,
@@ -2668,6 +2768,26 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
 
   const hasNextReviewQuestion = Boolean(getNextReviewRow());
 
+  const normalizedReviewHistory = editForm
+    ? normalizeReviewHistory(editForm.review_check_history)
+    : [];
+
+  const selectedReviewHistoryItem =
+    selectedReviewHistoryIndex === null
+      ? null
+      : normalizedReviewHistory[selectedReviewHistoryIndex] || null;
+
+  const isHistoryView = Boolean(selectedReviewHistoryItem);
+
+  const activeReviewView = isHistoryView
+    ? buildReviewViewFromHistoryEntry(selectedReviewHistoryItem)
+    : {
+        error_types: editForm?.error_types || [],
+        reason: editForm?.reason || "",
+        suggestion: editForm?.suggestion || "",
+        status: editForm?.status || "",
+      };
+
   const saveReview = async (nextStatus, options = {}) => {
     const { moveNext = false } = options;
     if (!editForm?.id) {
@@ -2675,17 +2795,33 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
       return;
     }
 
+    const forceNormal = nextStatus === "정상";
+
+    const nextHistory = forceNormal
+      ? []
+      : normalizeReviewHistory(editForm.review_check_history);
+
+    const nextErrorTypes = forceNormal
+      ? []
+      : normalizeErrorTypes(editForm.error_types || []);
+
+    const nextReason = forceNormal ? "" : editForm.reason || "";
+    const nextSuggestion = forceNormal ? "" : editForm.suggestion || "";
+
+
     const updated = {
       ...editForm,
       review_status: nextStatus || editForm.status,
       status: nextStatus || editForm.status,
-      error_type: normalizeErrorTypes(editForm.error_types || []).join(", "),
-      reason: editForm.reason || "",
-      suggestion: editForm.suggestion || "",
+      error_type: nextErrorTypes.join(", "),
+      reason: nextReason,
+      suggestion: nextSuggestion,
       keywords: editForm.keywords || "",
-      review_check_history: normalizeReviewHistory(editForm.review_check_history),
-      review_check_labels: uniqueLabels(editForm.review_check_labels || []),
-      review_scope_summary: editForm.review_scope_summary || makeReviewScopeSummary(editForm.review_check_labels || []),
+      review_check_history: nextHistory,
+      review_check_labels: forceNormal ? [] : uniqueLabels(editForm.review_check_labels || []),
+      review_scope_summary: forceNormal
+        ? ""
+        : editForm.review_scope_summary || makeReviewScopeSummary(editForm.review_check_labels || []),
     };
 
     try {
@@ -2868,7 +3004,10 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
           <span>세트명: {reviewTarget.setName || "전체"}</span>
           <span>과목명: {reviewTarget.subjectName || "전체"}</span>
           <span>하위유형: {reviewTarget.subtypeName || "전체"}</span>
-          <span>실행 시 시험 고유 번호는 TEMP_작업ID로 자동 생성됩니다.</span>
+          <span>
+            실행 시 사이트 URL의 시험 고유 번호가 있으면 해당 값으로 저장되고,
+            없으면 TEMP_작업ID로 저장됩니다.
+          </span>
         </div>
       ) : reviewTarget.courseName ? (
         selectedTargetMaps.length > 0 ? (
@@ -3014,14 +3153,89 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
       )}
 
       <div className="filter-actions">
-        <button className="btn btn-primary" type="button" onClick={() => { fetchQuestions(); fetchTargetMaps(); }} disabled={reviewRunning}>DB 새로고침</button>
-        <button className="btn btn-light" type="button" onClick={() => { setReviewTarget(DEFAULT_REVIEW_TARGET); setReviewCurrentPage(1);}} disabled={reviewRunning}> 입력 초기화 </button>
-        <button className="btn btn-success" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "uncheckedOrError")} disabled={reviewRunning}>{reviewRunning ? "검수 진행중" : "미검수/오류 문제 검수하기"}</button>
-        <button className="btn btn-warning" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "errorOnly")} disabled={reviewRunning}>오류있음만 검수하기</button>
-        <button className="btn btn-gray" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "holdOnly")} disabled={reviewRunning}>보류만 검수하기</button>
-        <button className="btn btn-blue" type="button" onClick={() => runAiReview(reviewTarget.targetScope, "normalOnly")} disabled={reviewRunning}>정상 문제 재검수하기</button>
-        <button className="btn btn-light" type="button" onClick={() => runAiReview(reviewTarget.targetScope, null)} disabled={reviewRunning}>선택 매핑 전체 검수</button>
-        <button className="btn btn-danger" type="button" onClick={cancelCurrentReview} disabled={!reviewRunning || !reviewJobInfo?.job_id || cancelingReview}> {cancelingReview ? "취소 요청 중" : "검수 취소"} </button>      
+        <button
+          className="btn btn-primary"
+          type="button"
+          onClick={() => { fetchQuestions(); fetchTargetMaps(); }}
+          disabled={reviewRunning}
+        >
+          DB 새로고침
+        </button>
+
+        <button
+          className="btn btn-light"
+          type="button"
+          onClick={() => {
+            setReviewTarget(DEFAULT_REVIEW_TARGET);
+            setReviewCurrentPage(1);
+          }}
+          disabled={reviewRunning}
+        >
+          입력 초기화
+        </button>
+
+        <button
+          className="btn btn-unchecked"
+          type="button"
+          onClick={() => runAiReview(reviewTarget.targetScope, "uncheckedOnly")}
+          disabled={reviewRunning}
+        >
+          {reviewRunning ? "검수 진행중" : "미검수 문제만 검수하기"}
+        </button>
+
+        <button
+          className="btn btn-unchecked-error"
+          type="button"
+          onClick={() => runAiReview(reviewTarget.targetScope, "uncheckedOrError")}
+          disabled={reviewRunning}
+        >
+          {reviewRunning ? "검수 진행중" : "미검수/오류 문제 검수하기"}
+        </button>
+
+        <button
+          className="btn btn-warning"
+          type="button"
+          onClick={() => runAiReview(reviewTarget.targetScope, "errorOnly")}
+          disabled={reviewRunning}
+        >
+          오류있음만 검수하기
+        </button>
+
+        <button
+          className="btn btn-gray"
+          type="button"
+          onClick={() => runAiReview(reviewTarget.targetScope, "holdOnly")}
+          disabled={reviewRunning}
+        >
+          보류만 검수하기
+        </button>
+
+        <button
+          className="btn btn-blue"
+          type="button"
+          onClick={() => runAiReview(reviewTarget.targetScope, "normalOnly")}
+          disabled={reviewRunning}
+        >
+          정상 문제 재검수하기
+        </button>
+
+        <button
+          className="btn btn-light"
+          type="button"
+          onClick={() => runAiReview(reviewTarget.targetScope, null)}
+          disabled={reviewRunning}
+        >
+          선택 매핑 전체 검수
+        </button>
+
+        <button
+          className="btn btn-danger"
+          type="button"
+          onClick={cancelCurrentReview}
+          disabled={!reviewRunning || !reviewJobInfo?.job_id || cancelingReview}
+        >
+          {cancelingReview ? "취소 요청 중" : "검수 취소"}
+        </button>
       </div>
     </section>
   );
@@ -3889,17 +4103,43 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                 <div className="review-history-box">
                   <div className="review-history-head">
                     <strong>누적 검수 내역</strong>
-                    <span>{editForm.review_scope_summary || makeReviewScopeSummary(editForm.review_check_labels || [])}</span>
+
+                    <div className="review-history-head-actions">
+                      <button
+                        type="button"
+                        className={`review-history-current-btn ${!isHistoryView ? "active" : ""}`}
+                        onClick={showCurrentReviewResult}
+                      >
+                        현재 누적 결과
+                      </button>
+
+                      <span>
+                        {isHistoryView
+                          ? selectedReviewHistoryItem.summary || makeReviewScopeSummary(selectedReviewHistoryItem.labels || [])
+                          : editForm.review_scope_summary || makeReviewScopeSummary(editForm.review_check_labels || [])}
+                      </span>
+                    </div>
                   </div>
 
                   {Array.isArray(editForm.review_check_history) && editForm.review_check_history.length > 0 ? (
                     <div className="review-history-list">
-                      {normalizeReviewHistory(editForm.review_check_history)
+                      {normalizedReviewHistory
                         .map((item, originalIndex) => ({ item, originalIndex }))
                         .reverse()
                         .slice(0, 6)
                         .map(({ item, originalIndex }) => (
-                          <div className="review-history-item" key={`${item.at || originalIndex}-${originalIndex}`}>
+                          <div
+                            className={`review-history-item ${selectedReviewHistoryIndex === originalIndex ? "active" : ""}`}
+                            key={`${item.at || originalIndex}-${originalIndex}`}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => showReviewHistoryEntry(originalIndex)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                showReviewHistoryEntry(originalIndex);
+                              }
+                            }}
+                          >
                             <div className="review-history-text">
                               <strong>{item.summary || makeReviewScopeSummary(item.labels || [])}</strong>
                               <span>{item.result || "-"} · {item.issue_count ?? 0}건</span>
@@ -3908,7 +4148,10 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                             <button
                               type="button"
                               className="review-history-delete-btn"
-                              onClick={() => deleteReviewHistoryEntry(originalIndex)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteReviewHistoryEntry(originalIndex);
+                              }}
                             >
                               삭제
                             </button>
@@ -3923,7 +4166,12 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                 <div className="review-content-top">
                   <label className="full-field review-status-field">
                     검수 상태
-                    <select name="status" value={editForm.status} onChange={handleEditChange}>
+                    <select
+                      name="status"
+                      value={isHistoryView ? activeReviewView.status : editForm.status}
+                      onChange={handleEditChange}
+                      disabled={isHistoryView}
+                    >
                       <option value="완료">완료</option>
                       <option value="정상">정상</option>
                       <option value="오류있음">오류있음</option>
@@ -3933,11 +4181,21 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                   </label>
 
                   <div className="side-actions top-actions">
-                    <button type="button" className="save-green" onClick={() => saveReview("정상")}>
+                    <button
+                      type="button"
+                      className="save-green"
+                      onClick={() => saveReview("정상")}
+                      disabled={isHistoryView}
+                    >
                       정상 처리 후 닫기
                     </button>
 
-                    <button type="button" className="save-dark" onClick={() => saveReview(editForm.status)}>
+                    <button
+                      type="button"
+                      className="save-dark"
+                      onClick={() => saveReview(editForm.status)}
+                      disabled={isHistoryView}
+                    >
                       저장 후 닫기
                     </button>
 
@@ -3945,12 +4203,17 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                       type="button"
                       className="save-blue"
                       onClick={() => saveReview(editForm.status, { moveNext: true })}
-                      disabled={!hasNextReviewQuestion}
+                      disabled={isHistoryView || !hasNextReviewQuestion}
                     >
                       저장 후 다음
                     </button>
 
-                    <button type="button" className="save-yellow" onClick={() => saveReview("보류")}>
+                    <button
+                      type="button"
+                      className="save-yellow"
+                      onClick={() => saveReview("보류")}
+                      disabled={isHistoryView}
+                    >
                       보류 처리
                     </button>
                   </div>
@@ -3966,8 +4229,9 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                             <label key={type} className="error-check-item">
                               <input
                                 type="checkbox"
-                                checked={editForm.error_types.includes(type)}
+                                checked={activeReviewView.error_types.includes(type)}
                                 onChange={() => toggleErrorType(type)}
+                                disabled={isHistoryView}
                               />
                               <span>{type}</span>
                             </label>
@@ -3984,8 +4248,9 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                             <label key={type} className="error-check-item">
                               <input
                                 type="checkbox"
-                                checked={editForm.error_types.includes(type)}
+                                checked={activeReviewView.error_types.includes(type)}
                                 onChange={() => toggleErrorType(type)}
+                                disabled={isHistoryView}
                               />
                               <span>{type}</span>
                             </label>
@@ -4000,8 +4265,9 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                       Reason / 오류 사유
                       <textarea
                         name="reason"
-                        value={editForm.reason || ""}
+                        value={activeReviewView.reason || ""}
                         onChange={handleEditChange}
+                        readOnly={isHistoryView}
                         placeholder="오류 사유를 입력하세요."
                       />
                     </label>
@@ -4010,8 +4276,9 @@ ${selectedReviewCheckLabels.map((label) => `- ${label}`).join("\n")}`
                       Suggestion / 수정 제안
                       <textarea
                         name="suggestion"
-                        value={editForm.suggestion || ""}
+                        value={activeReviewView.suggestion || ""}
                         onChange={handleEditChange}
+                        readOnly={isHistoryView}
                         placeholder="수정 제안을 입력하세요."
                       />
                     </label>

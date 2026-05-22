@@ -3365,7 +3365,15 @@ def get_question_number_fast(page):
     
 def replace_qnum_in_url(url: str, target_no: int) -> str | None:
     """
-    현재 문제 URL에서 qNum 값만 target_no로 교체합니다.
+    현재 문제 view URL에서 qNum 값만 target_no로 교체합니다.
+    qNum이 없으면 새로 추가합니다.
+
+    예:
+    exam2view2.php?exam=383&chk=1
+    -> exam2view2.php?exam=383&chk=1&qNum=3
+
+    exam2view2.php?exam=383&qNum=1
+    -> exam2view2.php?exam=383&qNum=3
     """
     if not url:
         return None
@@ -3373,11 +3381,8 @@ def replace_qnum_in_url(url: str, target_no: int) -> str | None:
     parsed = urlparse(url)
     query_items = parse_qsl(parsed.query, keep_blank_values=True)
 
-    if not query_items:
-        return None
-
-    has_qnum = False
     new_query_items = []
+    has_qnum = False
 
     for key, value in query_items:
         if key == "qNum":
@@ -3387,7 +3392,7 @@ def replace_qnum_in_url(url: str, target_no: int) -> str | None:
             new_query_items.append((key, value))
 
     if not has_qnum:
-        return None
+        new_query_items.append(("qNum", str(target_no)))
 
     new_query = urlencode(new_query_items, doseq=True)
 
@@ -3401,21 +3406,28 @@ def replace_qnum_in_url(url: str, target_no: int) -> str | None:
             parsed.fragment,
         )
     )
-
-
+    
+    
 def to_question_view_url(url: str | None) -> str | None:
     """
-    문제 번호 이동 화면 URL(exam1numberX.php)을
-    실제 문제 화면 URL(exam1viewX.php)로 변환합니다.
+    현재 URL의 examNnumberM.php를 examNviewM.php로 변환합니다.
+    N, M 숫자는 URL에 있는 값을 그대로 유지합니다.
+
+    예:
+    - exam1number1.php -> exam1view1.php
+    - exam1number2.php -> exam1view2.php
+    - exam2number1.php -> exam2view1.php
+    - exam2number2.php -> exam2view2.php
     """
     if not url:
         return None
 
     try:
         parsed = urlparse(url)
+
         new_path = re.sub(
-            r"exam1number(\d+)\.php",
-            r"exam1view\1.php",
+            r"exam(\d+)number(\d+)\.php",
+            r"exam\1view\2.php",
             parsed.path,
         )
 
@@ -3434,61 +3446,36 @@ def to_question_view_url(url: str | None) -> str | None:
         return url
 
 
-
 def find_qnum_base_url_from_page(page, target_no: int) -> str | None:
     """
-    현재 페이지의 문제 이동 링크를 기준으로 qNum만 바꾼 URL을 만듭니다.
-    우선순위:
-    1) 이전/다음 문제 링크: .cp1control1 a.btn-move
-    2) 상단 현재 문제 번호 링크: .cp1body1head1 a.b2
-    3) fallback: 기존 전체 qNum 링크 검색
+    현재 실제 문제 화면 URL을 기준으로 qNum만 변경합니다.
+    페이지 안의 exam...number... 링크는 사용하지 않습니다.
+
+    원칙:
+    - 현재 page.url이 examNviewM.php이면 그대로 사용
+    - 혹시 현재 page.url이 examNnumberM.php이면 view로 보정
+    - qNum만 target_no로 교체 또는 추가
     """
     try:
-        raw_url = page.evaluate(
-            """
-            () => {
-                const preferredSelectors = [
-                    ".cp1control1 a.btn-move[href*='qNum='][href*='exam1view']",
-                    ".cp1body1head1 a.b2[href*='qNum='][href*='exam1number']",
-                    ".cp1body1head1 a.b2[href*='qNum=']"
-                ];
+        current_url = page.url or ""
 
-                for (const sel of preferredSelectors) {
-                    const el = document.querySelector(sel);
-                    if (el) {
-                        const href = el.getAttribute("href") || "";
-                        if (href) return href;
-                    }
-                }
-
-                const els = Array.from(document.querySelectorAll("a[href*='qNum=']"));
-
-                for (const el of els) {
-                    const href = el.getAttribute("href") || "";
-                    if (href.includes("exam1view")) return href;
-                }
-
-                for (const el of els) {
-                    const href = el.getAttribute("href") || "";
-                    if (href.includes("exam1number")) return href;
-                }
-
-                return "";
-            }
-            """
-        )
-
-        if not raw_url:
+        if not current_url:
             return None
 
-        full_url = urljoin(page.url, raw_url)
-        target_url = replace_qnum_in_url(full_url, target_no)
-        return to_question_view_url(target_url)
+        if not re.search(r"exam\d+(?:view|number)\d+\.php", current_url):
+            print(f"[경고] 현재 URL이 문제 화면 URL 형식이 아닙니다: {current_url}")
+            return None
+
+        view_url = to_question_view_url(current_url)
+        target_url = replace_qnum_in_url(view_url, target_no)
+
+        return target_url
 
     except Exception as e:
-        print(f"[경고] qNum base URL 탐색 실패: {e}")
+        print(f"[경고] qNum view URL 생성 실패: {e}")
         return None
-
+    
+    
 def normalize_exam_unique_no(value: Any) -> str:
     """
     DB/프론트에서 넘어온 시험 고유번호를 문자열로 정리합니다.
@@ -3588,14 +3575,9 @@ def go_to_question_number(page, target_no: int) -> bool:
     except Exception:
         pass
 
-    # 1순위: 현재 URL에서 qNum만 바꾸고, 반드시 exam1view URL로 보정
-    target_url = replace_qnum_in_url(page.url, target_no)
-    target_url = to_question_view_url(target_url)
-
-    # 2순위: 현재 화면 안의 qNum 링크를 찾아서 qNum만 바꾸고, 반드시 exam1view URL로 보정
-    if not target_url:
-        target_url = find_qnum_base_url_from_page(page, target_no)
-        target_url = to_question_view_url(target_url)
+    # 현재 실제 문제 view URL에서 qNum만 변경합니다.
+    # 페이지 안의 exam...number... 링크는 사용하지 않습니다.
+    target_url = find_qnum_base_url_from_page(page, target_no)
 
     if not target_url:
         print(f"[경고] qNum 이동 URL을 만들지 못했습니다: {target_no}")

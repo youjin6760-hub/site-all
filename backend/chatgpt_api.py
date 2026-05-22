@@ -1799,6 +1799,12 @@ def review_raw_files(
 
     try:
         worker_count = max(1, min(MAX_REVIEW_WORKERS, len(raw_paths)))
+        print(
+            f"[GPT 검수 병렬 설정] "
+            f"MAX_REVIEW_WORKERS={MAX_REVIEW_WORKERS}, "
+            f"worker_count={worker_count}, "
+            f"raw_files={len(raw_paths)}"
+        )
 
         if worker_count == 1:
             for raw_file in raw_paths:

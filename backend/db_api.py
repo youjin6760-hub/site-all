@@ -914,6 +914,87 @@ def update_question(question_id: int, payload: dict):
     return {"ok": True, "id": question_id}
 
 
+@app.post("/api/questions/bulk-review-results")
+def bulk_update_question_review_results(payload: dict):
+    """
+    AI 검수 결과를 여러 문제에 한 번에 반영합니다.
+    프론트에서 문제별 PUT을 반복하지 않고, 한 트랜잭션으로 업데이트하기 위한 endpoint입니다.
+    """
+    init_db()
+
+    items = payload.get("items") or []
+    if not isinstance(items, list) or not items:
+        raise HTTPException(status_code=400, detail="items는 비어 있지 않은 배열이어야 합니다.")
+
+    allowed = {
+        "review_status",
+        "error_type",
+        "reason",
+        "suggestion",
+        "reviewer",
+        "reflect_status",
+        "review_check_labels",
+        "review_scope_summary",
+        "review_check_history",
+    }
+
+    now = now_text()
+    updated_count = 0
+    skipped_count = 0
+
+    with engine.begin() as conn:
+        for item in items:
+            if not isinstance(item, dict):
+                skipped_count += 1
+                continue
+
+            question_id = (
+                item.get("id")
+                or item.get("site_question_id")
+                or item.get("question_db_id")
+            )
+
+            try:
+                question_id = int(question_id)
+            except (TypeError, ValueError):
+                skipped_count += 1
+                continue
+
+            update_data = {
+                key: value
+                for key, value in item.items()
+                if key in allowed
+            }
+
+            if not update_data:
+                skipped_count += 1
+                continue
+
+            update_data["reviewed_at"] = now
+            update_data["updated_at"] = now
+            update_data["id"] = question_id
+
+            set_clause = ", ".join(
+                [f"{key} = :{key}" for key in update_data.keys() if key != "id"]
+            )
+
+            result = conn.execute(
+                text(f"UPDATE questions SET {set_clause} WHERE id = :id"),
+                update_data,
+            )
+
+            if result.rowcount:
+                updated_count += result.rowcount
+            else:
+                skipped_count += 1
+
+    return {
+        "ok": True,
+        "requested_count": len(items),
+        "updated_count": updated_count,
+        "skipped_count": skipped_count,
+    }
+
 
 @app.delete("/api/questions/{question_id}")
 def delete_question(question_id: int):

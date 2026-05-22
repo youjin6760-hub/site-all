@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -125,6 +126,73 @@ def read_json(path: Path) -> Any:
         raise HTTPException(status_code=404, detail=f"파일을 찾을 수 없습니다: {path.name}")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+    
+CLEANUP_COMPLETED_JOB_ARTIFACTS = (
+    os.getenv("CLEANUP_COMPLETED_JOB_ARTIFACTS", "false").lower() == "true"
+)
+
+CLEANUP_DELETE_IMAGES = (
+    os.getenv("CLEANUP_DELETE_IMAGES", "false").lower() == "true"
+)
+
+
+def cleanup_completed_job_artifacts(job_path: Path) -> dict[str, Any]:
+    """
+    completed job에서 용량을 많이 차지하는 중간 산출물을 삭제합니다.
+
+    유지:
+    - target.json
+    - status.json
+    - result.json
+    - chatgpt.xlsx
+    - formula.xlsx
+    - review_errors.json
+
+    삭제:
+    - raw/
+    - reviewed_json/
+    - debug/
+    - debug_api_response/
+    - images/  # CLEANUP_DELETE_IMAGES=true일 때
+    """
+    if not CLEANUP_COMPLETED_JOB_ARTIFACTS:
+        return {"enabled": False, "deleted": []}
+
+    dir_names = [
+        "raw",
+        "reviewed_json",
+        "debug",
+        "debug_api_response",
+    ]
+
+    if CLEANUP_DELETE_IMAGES:
+        dir_names.append("images")
+
+    deleted = []
+
+    for name in dir_names:
+        path = job_path / name
+
+        if not path.exists():
+            continue
+
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+                deleted.append(name)
+            elif path.is_file():
+                path.unlink(missing_ok=True)
+                deleted.append(name)
+        except Exception as e:
+            print(f"[JOB CLEANUP 실패] {path}: {e}")
+
+    if deleted:
+        print(f"[JOB CLEANUP 완료] {job_path.name}: {', '.join(deleted)}")
+
+    return {
+        "enabled": True,
+        "deleted": deleted,
+    }
 
 def load_reviewed_questions_from_job(job_path: Path) -> list[dict[str, Any]]:
     reviewed_dir = job_path / "reviewed_json"
@@ -246,12 +314,14 @@ def normalize_question_no(value: Any) -> str:
         return text_value
    
 def make_site_meta_key(
+    exam_unique_no: Any,
     set_name: Any,
     subject_name: Any,
     subtype_name: Any,
     question_no: Any,
 ) -> str:
     return "||".join([
+        normalize_question_no(exam_unique_no),
         str(set_name or "").strip(),
         str(subject_name or "").strip(),
         str(subtype_name or "").strip(),
@@ -298,6 +368,7 @@ def get_question_site_meta_map(target: dict[str, Any]) -> dict[str, dict[str, An
             }
 
             composite_key = make_site_meta_key(
+                exam_unique_no,
                 set_name,
                 subject_name,
                 subtype_name,
@@ -305,9 +376,6 @@ def get_question_site_meta_map(target: dict[str, Any]) -> dict[str, dict[str, An
             )
 
             mapping[composite_key] = meta
-
-            # 기존 단일 target 방식 호환용 fallback
-            mapping.setdefault(qno_key, meta)
 
     add_source(target)
 
@@ -372,6 +440,40 @@ def question_no_from_raw_file(path: Path) -> int:
         return int(float(value))
     except Exception:
         return 999999999
+
+
+def make_compact_raw_json(raw: dict[str, Any], job_id: str, raw_file_name: str) -> str:
+    """
+    DB raw_json에는 전체 수집 JSON을 넣지 않고,
+    추적에 필요한 최소 메타만 저장합니다.
+
+    cleanup 설정이 켜져 있으면 job/raw 원본은 완료 후 삭제될 수 있으므로,
+    DB에 꼭 필요한 원문은 questions의 question/view_text/choice/explanation 컬럼에 이미 분리 저장합니다.
+    """
+    data = raw.get("data", {}) or {}
+
+    compact = {
+        "job_id": job_id,
+        "raw_file": raw_file_name,
+        "question_id": raw.get("question_id", ""),
+        "exam_unique_no": raw.get("exam_unique_no") or data.get("exam_unique_no") or "",
+        "site_question_no": raw.get("site_question_no") or data.get("site_question_no"),
+        "source_url": raw.get("source_url") or data.get("source_url") or "",
+        "course_name": raw.get("course_name", ""),
+        "set_name": raw.get("set_name", ""),
+        "subject_name": raw.get("subject_name", ""),
+        "sub_title": raw.get("sub_title", ""),
+        "question_no": raw.get("question_no") or data.get("question_no") or "",
+        "has_image": bool(data.get("has_image")),
+        "has_question_image": bool(data.get("has_question_image")),
+        "has_choice_image": bool(data.get("has_choice_image")),
+        "image_count": len(data.get("image_elements", []) or []),
+        "explanation_image_count": len(data.get("explanation_images", []) or []),
+        "explanation_capture_meta": data.get("explanation_capture_meta", {}),
+        "question_image_capture_meta": data.get("question_image_capture_meta", {}),
+    }
+
+    return json.dumps(compact, ensure_ascii=False, default=str)
 
 
 def insert_collected_raw_to_questions_db(
@@ -456,6 +558,14 @@ def insert_collected_raw_to_questions_db(
 
             data = raw.get("data", {}) or {}
             choices = data.get("choices", []) or []
+            
+            raw_exam_unique_no = str(
+                raw.get("exam_unique_no")
+                or data.get("exam_unique_no")
+                or ""
+            ).strip()
+
+            row_exam_unique_no = raw_exam_unique_no or temp_exam_unique_no
 
             question_no = raw.get("question_no") or data.get("question_no") or ""
             subject_name = raw.get("subject_name") or target.get("subject_name") or ""
@@ -477,7 +587,7 @@ def insert_collected_raw_to_questions_db(
             params = {
                 "course_name": raw.get("course_name") or target.get("course_name") or "",
                 "upload_file": f"collect:{job_id}",
-                "exam_unique_no": temp_exam_unique_no,
+                "exam_unique_no": row_exam_unique_no,
                 "cd_value": str(data.get("cd_value") or raw.get("cd_value") or target.get("cd_value") or ""),
                 "set_name": set_name,
                 "subject_name": subject_name,
@@ -511,7 +621,7 @@ def insert_collected_raw_to_questions_db(
                 "review_check_labels": "",
                 "review_scope_summary": "",
                 "review_check_history": "",
-                "raw_json": json.dumps(raw, ensure_ascii=False, default=str),
+                "raw_json": make_compact_raw_json(raw, job_id, raw_file.name),
                 "created_at": now,
                 "updated_at": now,
             }
@@ -525,7 +635,7 @@ def insert_collected_raw_to_questions_db(
 
             inserted_questions.append({
                 "site_question_id": inserted_id,
-                "exam_unique_no": temp_exam_unique_no,
+                "exam_unique_no": row_exam_unique_no,
                 "question_no": str(question_no),
                 "set_name": set_name,
                 "subject_name": subject_name,
@@ -549,16 +659,20 @@ def build_site_result(job_id: str, target: dict[str, Any], reviewed_questions: l
         summary = reviewed.get("summary", {}) or {}
 
         qno = reviewed.get("question_no")
-        qno_key = normalize_question_no(qno)
+        reviewed_exam_unique_no = (
+            reviewed.get("exam_unique_no")
+            or target.get("exam_unique_no")
+        )
 
         site_key = make_site_meta_key(
+            reviewed_exam_unique_no,
             reviewed.get("set_name", ""),
             reviewed.get("subject_name", ""),
             reviewed.get("sub_title", ""),
             qno,
         )
 
-        site_meta = site_meta_map.get(site_key) or site_meta_map.get(qno_key, {})
+        site_meta = site_meta_map.get(site_key, {})
         issues = normalize_issues(reviewed)
 
         # summary.has_issue가 false여도 실제 issues가 있으면 오류 문제로 봅니다.
@@ -573,7 +687,7 @@ def build_site_result(job_id: str, target: dict[str, Any], reviewed_questions: l
 
         item = {
             "site_question_id": site_meta.get("site_question_id"),
-            "exam_unique_no": site_meta.get("exam_unique_no") or target.get("exam_unique_no"),
+            "exam_unique_no": site_meta.get("exam_unique_no") or reviewed_exam_unique_no,
             "question_id": reviewed.get("question_id", ""),
             "question_no": qno,
             "course_name": reviewed.get("course_name", ""),
@@ -876,9 +990,16 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
             )
 
             if inserted_questions:
-                temp_exam_unique_no = inserted_questions[0].get("exam_unique_no") or f"TEMP_{job_id}"
+                exam_unique_nos = sorted({
+                    str(item.get("exam_unique_no") or "").strip()
+                    for item in inserted_questions
+                    if str(item.get("exam_unique_no") or "").strip()
+                })
+
+                temp_exam_unique_no = exam_unique_nos[0] if exam_unique_nos else f"TEMP_{job_id}"
 
                 target["exam_unique_no"] = temp_exam_unique_no
+                target["exam_unique_nos"] = exam_unique_nos
                 target["questions"] = inserted_questions
 
                 # 이후 result 조회/부분 실패 처리에서도 같은 target을 쓰도록 저장합니다.
@@ -914,6 +1035,10 @@ def run_pipeline(job_id: str, target: dict[str, Any]) -> dict[str, Any]:
             issue_question_count=result["summary"]["issue_question_count"],
             mapping_error_count=result["summary"].get("mapping_error_count", 0),
         )
+
+        cleanup_info = cleanup_completed_job_artifacts(job_path)
+        result["cleanup"] = cleanup_info
+        write_json(job_path / "result.json", result)
 
         return result
 
